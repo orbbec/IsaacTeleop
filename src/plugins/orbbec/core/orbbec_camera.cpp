@@ -2,14 +2,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #define MCAP_IMPLEMENTATION
-#include "preview.hpp"
+#if defined(ORBBEC_ENABLE_PREVIEW)
+#    include "preview.hpp"
+#endif
+
+#include "inc/orbbec_camera/orbbec_camera.hpp"
 
 #include <flatbuffers/flatbuffers.h>
 #include <libobsensor/ObSensor.hpp>
 #include <mcap/recording_traits.hpp>
 #include <mcap/tracker_channels.hpp>
 #include <mcap/writer.hpp>
-#include <orbbec_camera/orbbec_camera.hpp>
 #include <oxr/oxr_session.hpp>
 #include <oxr_utils/os_time.hpp>
 #include <pusherio/schema_pusher.hpp>
@@ -1363,6 +1366,13 @@ public:
     Impl(const CaptureConfig& config, const std::vector<StreamConfig>& streams, std::unique_ptr<FrameSink> sink)
         : config_(config), streams_(streams), sink_(std::move(sink))
     {
+#if !defined(ORBBEC_ENABLE_PREVIEW)
+        if (config_.preview)
+        {
+            throw std::runtime_error(
+                "SDL preview is not available in this build. Reconfigure with -DORBBEC_ENABLE_PREVIEW=ON.");
+        }
+#endif
 #if defined(__linux__) || defined(__ANDROID__)
         context_.setUvcBackendType(OB_UVC_BACKEND_TYPE_LIBUVC);
 #endif
@@ -1452,8 +1462,10 @@ public:
             });
         std::cout << "Orbbec pipeline started for " << device_->getDeviceInfo()->getUid() << std::endl;
 
+#if defined(ORBBEC_ENABLE_PREVIEW)
         if (config_.preview)
             preview_ = std::make_unique<Preview>();
+#endif
 
         publish_calibration(pipeline_config);
         start_device_state();
@@ -1639,10 +1651,12 @@ public:
             captured.encoded_data.assign(frame->getData(), frame->getData() + frame->getDataSize());
             captured.sample_time_local_common_clock_ns = core::os_monotonic_now_ns();
             captured.sample_time_raw_device_clock_ns = static_cast<int64_t>(frame->getTimeStampUs()) * 1000;
+#if defined(ORBBEC_ENABLE_PREVIEW)
             if (preview_)
                 preview_->submit({ stream.camera, stream.pixel_format, captured.metadata.width, captured.metadata.height,
                                    captured.metadata.sequence_number, captured.sample_time_raw_device_clock_ns,
                                    captured.sample_time_local_common_clock_ns, captured.encoded_data });
+#endif
             sink_->on_frame(captured);
 
             auto& stats = stats_[stream.camera];
@@ -1685,7 +1699,11 @@ public:
     }
     bool preview_closed() const
     {
+#if defined(ORBBEC_ENABLE_PREVIEW)
         return preview_ && preview_->closed();
+#else
+        return false;
+#endif
     }
 
     struct ImuEvent
@@ -2137,7 +2155,9 @@ private:
     std::vector<StreamConfig> streams_;
     std::map<core::OrbbecCameraStream, std::shared_ptr<ob::VideoStreamProfile>> active_profiles_;
     std::unique_ptr<FrameSink> sink_;
+#if defined(ORBBEC_ENABLE_PREVIEW)
     std::unique_ptr<Preview> preview_;
+#endif
     std::map<core::OrbbecCameraStream, StreamStats> stats_;
     std::vector<std::pair<OBPropertyItem, double>> original_properties_;
     AuxiliaryStats auxiliary_stats_;

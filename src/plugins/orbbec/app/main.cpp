@@ -237,6 +237,13 @@ try
     }
     if (!capture_config.collection_prefix.empty() && !capture_config.mcap_filename.empty())
         throw std::runtime_error("--collection-prefix and --mcap-filename are mutually exclusive");
+#if !ORBBEC_ENABLE_PREVIEW
+    if (capture_config.preview)
+    {
+        throw std::runtime_error(
+            "--preview requires a preview-enabled build. Reconfigure with -DORBBEC_ENABLE_PREVIEW=ON.");
+    }
+#endif
     if (capture_config.imu_rate != 400 && capture_config.imu_rate != 1000)
         throw std::runtime_error("--imu-rate must be 400 or 1000");
     const bool embedded_media = capture_config.mcap_media_mode == plugins::orbbec::McapMediaMode::Embedded;

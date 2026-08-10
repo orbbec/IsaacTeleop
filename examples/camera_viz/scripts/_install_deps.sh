@@ -81,9 +81,9 @@ while (( $# )); do
         --with-zed)     WITH_ZED=true; shift;;
         --zed-sdk)      ZED_SDK_DIR=$2; shift 2;;
         --build-from-source) BUILD_FROM_SOURCE=true; shift;;
-        *) die "unknown arg: $1";;
         --with-orbbec)  WITH_ORBBEC=true; shift;;
         --orbbec-sdk-root) ORBBEC_SDK_DIR=$2; shift 2;;
+        *) die "unknown arg: $1";;
     esac
 done
 
@@ -483,6 +483,7 @@ $WITH_V4L2 && EXTRAS+=(v4l2)
 $WITH_OAKD && EXTRAS+=(oakd)
 $WITH_RTP  && EXTRAS+=(rtp)
 $WITH_ZED  && EXTRAS+=(zed)
+$WITH_ORBBEC && EXTRAS+=(orbbec)
 step "camera_viz setup — ${MODE} mode"
 note "venv    $VENV_DIR"
 note "python  $PYTHON_VERSION"
@@ -544,7 +545,8 @@ PKGS=("pyyaml>=6.0" "$target_cupy" "numpy>=1.23" "scipy>=1.15")
 [[ "$MODE" == full ]] && PKGS=("$ISAACTELEOP_PKG" "${PKGS[@]}")
 $WITH_V4L2 && PKGS+=("opencv-python>=4.5")
 $WITH_OAKD && PKGS+=("depthai>=3.0")
-$WITH_RTP  && PKGS+=("pybind11>=2.11" "PyGObject>=3.42,<3.52")
+$WITH_ORBBEC && PKGS+=("pybind11>=2.11")
+$WITH_RTP && PKGS+=("PyGObject>=3.42,<3.52")
 
 # Local wheels keep version ``1.3+local`` across rebuilds; uv's --upgrade
 # no-ops on them. mtime probe forces a reinstall when the wheel's newer.
@@ -605,9 +607,9 @@ if $WITH_ORBBEC; then
     deactivate
 fi
 
-# Native NVENC/NVDEC codec. Failures are non-fatal: the runtime falls
-# back to the GStreamer encoder when the native ``.so`` isn't importable.
-if $WITH_RTP; then
+# Native NVENC/NVDEC codec. Orbbec H.264/H.265 camera sources also require it
+# locally, independent of the optional RTP/GStreamer transport.
+if $WITH_RTP || $WITH_ORBBEC; then
     CODEC_DIR="$CAMERA_VIZ_DIR/codec"
     if [[ -d "$CODEC_DIR" ]]; then
         step "building native NVENC/NVDEC codec"
@@ -622,10 +624,14 @@ camera_viz sources require the native NVDEC codec; an NVIDIA driver and nvidia-s
 alone are not sufficient. Install NVIDIA's CUDA Toolkit, verify `nvcc --version`,
 then rerun setup. For MJPEG-only preview, set `format: mjpg` in orbbec_ego.yaml.
 EOF
-        else
-                warn "codec build failed — falling back to the GStreamer encoder at runtime"
+            else
+                if $WITH_ORBBEC; then
+                    warn "codec build failed. Orbbec H.264/H.265 requires the native NVDEC codec; install the CUDA Toolkit and rerun setup, or use format: mjpg."
+                else
+                    warn "codec build failed — falling back to the GStreamer encoder at runtime"
+                fi
+            fi
         fi
-    fi
         deactivate
     fi
 fi
