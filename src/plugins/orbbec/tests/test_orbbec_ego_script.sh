@@ -57,3 +57,42 @@ if grep -q '^--audio-output=' "$MOCK_ARGS"; then
     echo "Embedded capture must not request a WAV sidecar by default" >&2
     exit 1
 fi
+
+PACKAGE_DIR="$TMPDIR_TEST/package/plugins/orbbec_camera"
+MOCK_BIN="$TMPDIR_TEST/bin"
+mkdir -p "$PACKAGE_DIR/extensions" "$MOCK_BIN"
+cp "$SCRIPT" "$PACKAGE_DIR/orbbec_ego.sh"
+chmod +x "$PACKAGE_DIR/orbbec_ego.sh"
+touch "$PACKAGE_DIR/libOrbbecSDK.so.2" "$PACKAGE_DIR/OrbbecSDKConfig.xml"
+
+cat > "$PACKAGE_DIR/camera_plugin_orbbec" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1" == "--help" ]]; then
+    exit 0
+fi
+exit 1
+EOF
+cat > "$PACKAGE_DIR/orbbec_mcap_export_media" <<'EOF'
+#!/usr/bin/env bash
+mkdir -p "$2"
+touch "$2/ColorLeft.h264" "$2/ColorRight.h264"
+EOF
+chmod +x "$PACKAGE_DIR/camera_plugin_orbbec" "$PACKAGE_DIR/orbbec_mcap_export_media"
+
+for command_name in python3 ffmpeg ffprobe; do
+    cat > "$MOCK_BIN/$command_name" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "$MOCK_BIN/$command_name"
+done
+
+PACKAGE_RUN="$TMPDIR_TEST/package_run"
+mkdir -p "$PACKAGE_RUN"
+printf '\0' > "$PACKAGE_RUN/metadata.mcap"
+PATH="$MOCK_BIN:$PATH" "$PACKAGE_DIR/orbbec_ego.sh" doctor >/dev/null
+PATH="$MOCK_BIN:$PATH" "$PACKAGE_DIR/orbbec_ego.sh" export-media "$PACKAGE_RUN" >/dev/null
+test -f "$PACKAGE_RUN/exported/ColorLeft.h264"
+expect_failure env PATH="$MOCK_BIN:$PATH" "$PACKAGE_DIR/orbbec_ego.sh" export-media "$PACKAGE_RUN"
+rm "$PACKAGE_DIR/orbbec_mcap_export_media"
+expect_failure env PATH="$MOCK_BIN:$PATH" "$PACKAGE_DIR/orbbec_ego.sh" doctor

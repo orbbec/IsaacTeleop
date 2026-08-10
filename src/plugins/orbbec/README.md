@@ -46,15 +46,21 @@ lib/libOrbbecSDK.so.2
 lib/extensions/
 ```
 
-The standard host tools are CMake **3.24 or newer**, a C++ compiler, Python, `uv`, FFmpeg, and
-the Isaac Teleop preset dependencies. For the plugin preview also install SDL2
-and FFmpeg development packages:
+The standard host tools are CMake **3.24 or newer**, a C++ compiler, Python,
+`uv`, FFmpeg, and the Isaac Teleop build dependencies. A recording-only build
+does **not** need SDL2 or FFmpeg development packages.
 
 ```bash
 sudo apt update
 sudo apt install -y build-essential cmake ccache clang-format-14 patchelf \
-  pkg-config libudev-dev libsdl2-dev libavcodec-dev libavutil-dev libswscale-dev \
-  ffmpeg jq usbutils
+  pkg-config libudev-dev ffmpeg jq usbutils
+```
+
+The SDL preview is an optional build feature. Install its development packages
+only when building with `--preview`:
+
+```bash
+sudo apt install -y libsdl2-dev libavcodec-dev libavutil-dev libswscale-dev
 ```
 
 Install the udev rules provided by the **same SDK release** before using the
@@ -80,11 +86,14 @@ Open a fresh terminal at the repository root:
 cd /absolute/path/to/IsaacTeleop
 export ORBBEC_SDK=/absolute/path/to/OrbbecSDK_v2_linux_x86_64
 
-# 1. Inspect host dependencies, SDK layout, USB access, and preview libraries.
+# 1. Inspect host dependencies, SDK layout, USB access, and optional preview libraries.
 ./src/plugins/orbbec/orbbec_ego.sh doctor --sdk-root "$ORBBEC_SDK"
 
 # 2. Configure and build only the Orbbec plugin and embedded-media exporter.
 ./src/plugins/orbbec/orbbec_ego.sh build --sdk-root "$ORBBEC_SDK" --jobs 8
+
+# Add --preview only after installing the optional SDL/FFmpeg development packages.
+# ./src/plugins/orbbec/orbbec_ego.sh build --sdk-root "$ORBBEC_SDK" --preview --jobs 8
 
 # 3. Inspect the connected camera's actual profiles and control ranges.
 ./src/plugins/orbbec/orbbec_ego.sh capabilities
@@ -128,10 +137,11 @@ Footer and its required topics.
 
 ```bash
 ./src/plugins/orbbec/orbbec_ego.sh doctor --sdk-root "$ORBBEC_SDK"
-./src/plugins/orbbec/orbbec_ego.sh build --sdk-root "$ORBBEC_SDK" [--jobs N] [--clean]
+./src/plugins/orbbec/orbbec_ego.sh build --sdk-root "$ORBBEC_SDK" [--preview] [--jobs N] [--clean]
 ./src/plugins/orbbec/orbbec_ego.sh capabilities
 ./src/plugins/orbbec/orbbec_ego.sh record [options] [-- PLUGIN_OPTIONS...]
 ./src/plugins/orbbec/orbbec_ego.sh verify RUN_DIRECTORY
+./src/plugins/orbbec/orbbec_ego.sh export-media RUN_DIRECTORY [--output DIRECTORY]
 ```
 
 Useful recording options:
@@ -142,7 +152,7 @@ Useful recording options:
   --format h265 --width 1600 --height 1300 --fps 30 \
   --output recordings/demo_h265
 
-# Disable optional sensors, choose one camera, or show the SDL preview.
+# Disable optional sensors, choose one camera, or show the SDL preview (after a --preview build).
 ./src/plugins/orbbec/orbbec_ego.sh record --duration 30 \
   --device-uid DEVICE_UID --no-imu --preview
 
@@ -228,8 +238,7 @@ orbbec_media/Audio
 Export a completed embedded MCAP for ordinary playback:
 
 ```bash
-EXPORTER="$PWD/build-orbbec-py3.11/src/plugins/orbbec/app/orbbec_mcap_export_media"
-"$EXPORTER" "$RUN/metadata.mcap" "$RUN/exported"
+./src/plugins/orbbec/orbbec_ego.sh export-media "$RUN"
 ```
 
 The output is `ColorLeft.<format>`, `ColorRight.<format>`, and `Audio.wav`.
@@ -289,7 +298,7 @@ ffmpeg -v error -f h264 -i "$RUN/raw/ColorRight.h264" -f null -
 ffprobe -v error -show_entries stream=codec_name,sample_rate,channels \
   -of default=noprint_wrappers=1 "$RUN/Audio.wav"
 
-ffmpeg -f h264 -framerate 30 -i "$RUN/raw/ColorLeft.h264" -c:v copy "$RUN/ColorLeft.mp4"
+ffmpeg -y -f h264 -framerate 30 -i "$RUN/raw/ColorLeft.h264" -c:v copy "$RUN/ColorLeft.mp4"
 xdg-open "$RUN/ColorLeft.mp4"
 xdg-open "$RUN/Audio.wav"
 ```

@@ -5,6 +5,7 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
+camera_viz_dir="$(dirname "$here")"
 sdk_root="${ORBBEC_SDK_ROOT:-}"
 while (( $# )); do
     case $1 in
@@ -20,6 +21,10 @@ if [[ -z "${VIRTUAL_ENV:-}" ]]; then
     echo "build.sh: activate examples/camera_viz/.venv first" >&2
     exit 1
 fi
+if [[ ! -f "$sdk_root/lib/libOrbbecSDK.so" ]]; then
+    echo "build.sh: libOrbbecSDK.so was not found under: $sdk_root/lib" >&2
+    exit 1
+fi
 
 generator=()
 if command -v ninja >/dev/null 2>&1; then
@@ -28,5 +33,7 @@ fi
 cmake -S "$here" -B "$here/build" "${generator[@]}" \
     -DCMAKE_BUILD_TYPE=Release \
     -DPython3_EXECUTABLE="$(command -v python)" \
+    -UORBBEC_SDK_LIBRARY \
     -DORBBEC_SDK_ROOT="$sdk_root"
 cmake --build "$here/build" --parallel
+(cd "$camera_viz_dir" && python -c 'from orbbec import Capture')

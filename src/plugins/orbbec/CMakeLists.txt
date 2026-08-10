@@ -38,6 +38,7 @@ endif()
 
 add_subdirectory(core)
 add_subdirectory(app)
+add_subdirectory(export_media)
 if(BUILD_TESTING)
     add_subdirectory(tests)
 endif()

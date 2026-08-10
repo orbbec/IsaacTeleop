@@ -25,10 +25,11 @@ usage() {
     cat <<'EOF'
 Usage:
   src/plugins/orbbec/orbbec_ego.sh doctor [--sdk-root PATH] [--preset py3.11]
-  src/plugins/orbbec/orbbec_ego.sh build --sdk-root PATH [--preset py3.11] [--jobs N] [--clean] [--install-prefix PATH]
+  src/plugins/orbbec/orbbec_ego.sh build --sdk-root PATH [--preview] [--preset py3.11] [--jobs N] [--clean] [--install-prefix PATH]
   src/plugins/orbbec/orbbec_ego.sh capabilities [--preset py3.11] [--plugin PATH]
   src/plugins/orbbec/orbbec_ego.sh record [options] [-- PLUGIN_OPTIONS...]
   src/plugins/orbbec/orbbec_ego.sh verify RUN_DIRECTORY [--preset py3.11] [--plugin PATH]
+  src/plugins/orbbec/orbbec_ego.sh export-media RUN_DIRECTORY [--output DIRECTORY] [--preset py3.11]
 
 Common record options:
   --duration SECONDS              Stop cleanly after SECONDS; omit for Ctrl-C.
@@ -37,7 +38,7 @@ Common record options:
   --width N --height N --fps N    Default: 1600 1300 30.
   --device-uid UID                Select one enumerated device.
   --no-imu --no-audio             Do not request optional sensors.
-  --preview                       Enable the plugin's SDL preview.
+  --preview                       Enable the plugin's SDL preview (requires a --preview build).
   --mcap-media MODE               metadata-only (default) or embedded.
   --keep-media-sidecars           Retain H.264/H.265/MJPEG and WAV beside embedded MCAP.
   --preset NAME --plugin PATH     Select a build tree or override the executable.
@@ -45,9 +46,11 @@ Common record options:
 Examples:
   ./src/plugins/orbbec/orbbec_ego.sh doctor --sdk-root /opt/OrbbecSDK
   ./src/plugins/orbbec/orbbec_ego.sh build --sdk-root /opt/OrbbecSDK --jobs 8
+  ./src/plugins/orbbec/orbbec_ego.sh build --sdk-root /opt/OrbbecSDK --preview --jobs 8
   ./src/plugins/orbbec/orbbec_ego.sh capabilities
   ./src/plugins/orbbec/orbbec_ego.sh record --duration 30
   ./src/plugins/orbbec/orbbec_ego.sh verify recordings/orbbec_ego_20260810_120000
+  ./src/plugins/orbbec/orbbec_ego.sh export-media recordings/embedded_demo
 
 All options after -- are passed unchanged to camera_plugin_orbbec.  For example:
   ... record --duration 30 -- --bitrate=8 --dynamic-bitrate=on
@@ -101,7 +104,7 @@ resolve_exporter() {
     if [[ -x "$SCRIPT_DIR/orbbec_mcap_export_media" ]]; then
         candidate="$SCRIPT_DIR/orbbec_mcap_export_media"
     else
-        candidate="$(build_dir_for_preset "$preset")/src/plugins/orbbec/app/orbbec_mcap_export_media"
+        candidate="$(build_dir_for_preset "$preset")/src/plugins/orbbec/export_media/orbbec_mcap_export_media"
     fi
     [[ -x "$candidate" ]] || die "Embedded-media exporter is not executable: $candidate. Run 'build' first."
     echo "$candidate"
@@ -151,14 +154,25 @@ command_doctor() {
         . /etc/os-release
         echo "OS: ${PRETTY_NAME:-unknown}"
     fi
-    require_cmake_version || failed=1
-    require_command c++ "Install it with: sudo apt update && sudo apt install -y build-essential" || failed=1
     require_command python3 "Install it with: sudo apt update && sudo apt install -y python3" || failed=1
-    require_command uv "Install uv before configuring Isaac Teleop." || failed=1
     require_command ffmpeg "Install it with: sudo apt update && sudo apt install -y ffmpeg" || failed=1
     require_command ffprobe "Install it with: sudo apt update && sudo apt install -y ffmpeg" || failed=1
-    if ! require_command patchelf "Install it with: sudo apt update && sudo apt install -y patchelf"; then
-        warn "CloudXR packaging can retain a host OpenSSL dependency without patchelf."
+    if command -v python3 >/dev/null 2>&1 \
+            && ! python3 -c 'from mcap.reader import make_reader' >/dev/null 2>&1; then
+        warn "Python MCAP reader is missing. Install it with: python3 -m pip install --user mcap"
+        failed=1
+    fi
+
+    local source_checkout=0
+    [[ -f "$SOURCE_ROOT/CMakeLists.txt" ]] && source_checkout=1
+    if (( source_checkout )); then
+        require_cmake_version || failed=1
+        require_command c++ "Install it with: sudo apt update && sudo apt install -y build-essential" || failed=1
+        require_command uv "Install uv before configuring Isaac Teleop." || failed=1
+        if [[ -z "$sdk_root" ]]; then
+            warn "No SDK root supplied. Source builds require --sdk-root PATH or ORBBEC_SDK_ROOT."
+            failed=1
+        fi
     fi
 
     if [[ -n "$sdk_root" ]]; then
@@ -170,27 +184,33 @@ command_doctor() {
                 warn "Could not find this SDK release's shared/install_udev_rules.sh. Consult its package documentation."
             fi
         fi
-    else
-        warn "No SDK root supplied. Build requires --sdk-root PATH or ORBBEC_SDK_ROOT."
-        failed=1
-    fi
-
-    if command -v pkg-config >/dev/null 2>&1; then
-        local preview_package
-        for preview_package in sdl2 libavcodec libavutil libswscale; do
-            if ! pkg-config --exists "$preview_package"; then
-                warn "Optional SDL preview dependency '$preview_package' is missing. Install libsdl2-dev libavcodec-dev libavutil-dev libswscale-dev."
-            fi
-        done
-    else
-        warn "pkg-config is missing; SDL preview dependencies cannot be checked."
     fi
 
     local plugin=""
     if plugin="$(resolve_plugin "$preset" "" 2>/dev/null)"; then
         echo "Plugin: $plugin"
     else
-        warn "Plugin is not built for $preset yet. Run: $SCRIPT_DIR/orbbec_ego.sh build --sdk-root PATH"
+        if (( source_checkout )); then
+            warn "Plugin is not built yet. Run: $SCRIPT_DIR/orbbec_ego.sh build --sdk-root PATH"
+        else
+            warn "Plugin is unavailable. Install a complete prebuilt package."
+            failed=1
+        fi
+    fi
+
+    if (( !source_checkout )); then
+        local package_file
+        for package_file in "$SCRIPT_DIR/orbbec_mcap_export_media" "$SCRIPT_DIR/libOrbbecSDK.so.2" \
+                "$SCRIPT_DIR/OrbbecSDKConfig.xml" "$SCRIPT_DIR/extensions"; do
+            if [[ ! -e "$package_file" ]]; then
+                warn "Prebuilt package is incomplete: missing $package_file"
+                failed=1
+            fi
+        done
+        if [[ -n "$plugin" ]] && ! "$plugin" --help >/dev/null 2>&1; then
+            warn "Plugin cannot start. Check the packaged SDK libraries and host runtime dependencies."
+            failed=1
+        fi
     fi
 
     if command -v lsusb >/dev/null 2>&1; then
@@ -219,7 +239,7 @@ command_doctor() {
     if (( failed )); then
         return 1
     fi
-    echo "Doctor completed. Hardware and preview warnings above are actionable but do not block a source build."
+    echo "Doctor completed. Connect the camera and run capabilities before recording."
 }
 
 command_build() {
@@ -227,13 +247,16 @@ command_build() {
     local preset="$DEFAULT_PRESET"
     local jobs=""
     local clean=0
+    local preview=0
     local install_prefix=""
+    local -a cmake_args=()
     while (( $# )); do
         case "$1" in
             --sdk-root) sdk_root="${2:-}"; shift 2 ;;
             --preset) preset="${2:-}"; shift 2 ;;
             --jobs) jobs="${2:-}"; shift 2 ;;
             --clean) clean=1; shift ;;
+            --preview) preview=1; shift ;;
             --install-prefix) install_prefix="${2:-}"; shift 2 ;;
             --help|-h) usage; return 0 ;;
             *) die "Unknown build option: $1" ;;
@@ -249,13 +272,18 @@ command_build() {
         echo "Removing generated build directory: $build_dir"
         cmake -E rm -rf "$build_dir"
     fi
+    local preview_option=OFF
+    if (( preview )); then
+        preview_option=ON
+    fi
     (
         cd "$SOURCE_ROOT"
         cmake -S "$SOURCE_ROOT" -B "$build_dir" \
             -DISAAC_TELEOP_PYTHON_VERSION="$(preset_python_version "$preset")" \
             -DBUILD_VIZ=OFF \
             -DBUILD_PLUGIN_ORBBEC_CAMERA=ON \
-            -DORBBEC_SDK_ROOT="$sdk_root"
+            -DORBBEC_SDK_ROOT="$sdk_root" \
+            -DORBBEC_ENABLE_PREVIEW="$preview_option"
         local build_args=(--build "$build_dir" --target camera_plugin_orbbec orbbec_mcap_export_media)
         if [[ -n "$jobs" ]]; then
             [[ "$jobs" =~ ^[1-9][0-9]*$ ]] || die "--jobs must be a positive integer."
@@ -564,6 +592,33 @@ PY
     echo "Delivery file: $mcap"
 }
 
+command_export_media() {
+    local run_dir="${1:-}"
+    shift || true
+    [[ -n "$run_dir" ]] || die "export-media requires a RUN_DIRECTORY"
+    [[ -d "$run_dir" ]] || die "Run directory does not exist: $run_dir"
+    run_dir="$(cd "$run_dir" && pwd)"
+    local preset="$DEFAULT_PRESET"
+    local output_dir="$run_dir/exported"
+    while (( $# )); do
+        case "$1" in
+            --output) output_dir="${2:-}"; shift 2 ;;
+            --preset) preset="${2:-}"; shift 2 ;;
+            --help|-h) usage; return 0 ;;
+            *) die "Unknown export-media option: $1" ;;
+        esac
+    done
+    preset_python_version "$preset" >/dev/null
+    [[ -n "$output_dir" ]] || die "--output requires a DIRECTORY"
+    [[ "$output_dir" = /* ]] || output_dir="$PWD/$output_dir"
+    local mcap="$run_dir/metadata.mcap"
+    [[ -s "$mcap" ]] || die "Missing or empty MCAP: $mcap"
+    [[ ! -e "$mcap.partial" ]] || die "Incomplete capture: found $mcap.partial"
+    [[ ! -e "$output_dir" ]] || die "Export output already exists: $output_dir"
+    "$(resolve_exporter "$preset")" "$mcap" "$output_dir"
+    echo "Export completed: $output_dir"
+}
+
 main() {
     local command="${1:-}"
     [[ -n "$command" ]] || { usage; return 1; }
@@ -574,6 +629,7 @@ main() {
         capabilities) command_capabilities "$@" ;;
         record) command_record "$@" ;;
         verify) command_verify "$@" ;;
+        export-media) command_export_media "$@" ;;
         --help|-h|help) usage ;;
         *) die "Unknown command '$command'." ;;
     esac
