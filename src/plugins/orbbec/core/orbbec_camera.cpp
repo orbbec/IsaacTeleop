@@ -1448,6 +1448,8 @@ public:
             {
                 if (!frame_set)
                     return;
+                // Device-state polling can delay consumer processing; preserve the SDK delivery time.
+                const int64_t arrival_time_local_common_clock_ns = core::os_monotonic_now_ns();
                 {
                     std::lock_guard<std::mutex> lock(video_queue_mutex_);
                     if (video_frame_sets_.size() >= kMaxQueuedVideoFrameSets)
@@ -1456,7 +1458,7 @@ public:
                         set_async_error("Orbbec video callback queue is full; capture stopped to avoid silent loss");
                         return;
                     }
-                    video_frame_sets_.push_back(std::move(frame_set));
+                    video_frame_sets_.emplace_back(std::move(frame_set), arrival_time_local_common_clock_ns);
                 }
                 video_queue_cv_.notify_one();
             });
@@ -1599,9 +1601,9 @@ public:
         if (const auto error = sink_->metadata_error(); !error.empty())
             throw std::runtime_error("Orbbec metadata publication failed: " + error);
         drain_events();
+        drain_video_frames();
         if (std::chrono::steady_clock::now() - last_device_poll_ >= std::chrono::seconds(5))
             poll_device_state();
-        drain_video_frames();
         drain_events();
         if (const auto error = sink_->metadata_error(); !error.empty())
             throw std::runtime_error("Orbbec metadata publication failed: " + error);
@@ -1609,18 +1611,18 @@ public:
 
     void drain_video_frames()
     {
-        std::deque<std::shared_ptr<ob::FrameSet>> pending;
+        std::deque<std::pair<std::shared_ptr<ob::FrameSet>, int64_t>> pending;
         {
             std::unique_lock<std::mutex> lock(video_queue_mutex_);
             if (video_frame_sets_.empty())
                 video_queue_cv_.wait_for(lock, std::chrono::milliseconds(20));
             pending.swap(video_frame_sets_);
         }
-        for (const auto& frame_set : pending)
-            process_frame_set(frame_set);
+        for (const auto& [frame_set, arrival_time_local_common_clock_ns] : pending)
+            process_frame_set(frame_set, arrival_time_local_common_clock_ns);
     }
 
-    void process_frame_set(const std::shared_ptr<ob::FrameSet>& frame_set)
+    void process_frame_set(const std::shared_ptr<ob::FrameSet>& frame_set, int64_t arrival_time_local_common_clock_ns)
     {
         if (!frame_set)
             return;
@@ -1648,8 +1650,8 @@ public:
                 if (frame->hasMetadata(metadata_type))
                     captured.metadata.sdk_metadata.emplace_back(type, frame->getMetadataValue(metadata_type));
             }
+            captured.sample_time_local_common_clock_ns = arrival_time_local_common_clock_ns;
             captured.encoded_data.assign(frame->getData(), frame->getData() + frame->getDataSize());
-            captured.sample_time_local_common_clock_ns = core::os_monotonic_now_ns();
             captured.sample_time_raw_device_clock_ns = static_cast<int64_t>(frame->getTimeStampUs()) * 1000;
 #if defined(ORBBEC_ENABLE_PREVIEW)
             if (preview_)
@@ -2171,7 +2173,7 @@ private:
     mutable std::mutex queue_mutex_;
     mutable std::mutex video_queue_mutex_;
     std::condition_variable video_queue_cv_;
-    std::deque<std::shared_ptr<ob::FrameSet>> video_frame_sets_;
+    std::deque<std::pair<std::shared_ptr<ob::FrameSet>, int64_t>> video_frame_sets_;
     std::deque<PublishEvent> events_;
     std::string async_error_;
     uint64_t polled_state_sequence_ = 0;

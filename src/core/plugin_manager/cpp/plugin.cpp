@@ -188,12 +188,14 @@ void Plugin::stop_process()
         kill(m_pid, SIGINT);
 
         int status;
-        int attempts = 0;
+        // Hardware plugins may need time after SIGINT to drain sensors and atomically
+        // publish media-container footers before the manager falls back to SIGKILL.
+        constexpr auto kGracefulShutdownTimeout = std::chrono::seconds(15);
+        const auto deadline = std::chrono::steady_clock::now() + kGracefulShutdownTimeout;
         while (waitpid(m_pid, &status, WNOHANG) == 0)
         {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            attempts++;
-            if (attempts > 40)
+            if (std::chrono::steady_clock::now() >= deadline)
             {
                 kill(m_pid, SIGKILL);
                 waitpid(m_pid, &status, 0);

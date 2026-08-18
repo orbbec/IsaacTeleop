@@ -79,6 +79,10 @@ std::unique_ptr<mcap::McapReader> open_mcap_reader(const std::string& filename)
     const auto open_status = input->open(filename);
     if (!open_status.ok())
         throw std::runtime_error("DeviceIOSession: cannot read MCAP fragment '" + filename + "': " + open_status.message);
+    const auto summary_status = input->readSummary(mcap::ReadSummaryMethod::NoFallbackScan);
+    if (!summary_status.ok())
+        throw std::runtime_error("DeviceIOSession: cannot read MCAP fragment summary '" + filename +
+                                 "': " + summary_status.message);
     return input;
 }
 

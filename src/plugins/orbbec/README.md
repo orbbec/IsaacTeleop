@@ -286,6 +286,30 @@ channels. It requires a running OpenXR runtime. Camera-only testing is covered
 by `examples/oxr/python/test_orbbec_camera.py`; a physical XR setup is required
 to accept a true multi-device session.
 
+To make that same final TeleopSession MCAP self-contained, configure an
+embedded media fragment and use matching plugin arguments. The fragment is
+written by the camera process and merged only after both the plugin and session
+have closed cleanly:
+
+```python
+recording.embedded_media_filename = "<run>/orbbec_media_fragment.mcap"
+```
+
+```text
+--collection-prefix=orbbec_ego
+--mcap-media=embedded
+--mcap-media-spool=<run>/orbbec_media_fragment.mcap
+--add-stream=camera=ColorLeft,format=h264,width=1600,height=1300,fps=30
+--add-stream=camera=ColorRight,format=h264,width=1600,height=1300,fps=30
+--enable-imu
+--enable-audio
+```
+
+Do not forcibly terminate the TeleopSession. A completed final MCAP has no
+`.partial` sibling and can be checked with `export-media` or a standard MCAP
+reader; preserve any fragment or `.partial` file for diagnosis instead of
+publishing it.
+
 ## Inspect and play recordings
 
 Elementary video has no container index. Validate it first, then remux it into
@@ -431,9 +455,10 @@ After installation, `orbbec_ego.sh` is installed beside the Orbbec plugin and
 supports `capabilities`, `record`, and `verify`. Its `build` command is only
 for a source checkout.
 
-For a reproducible build, use the checked-in clean-room Dockerfile. Docker
-validates source + separately supplied SDK; camera access, udev, SDL, CUDA, and
-XR remain host-side tests.
+The checked-in clean-room Dockerfile is an **optional developer/CI check** for
+reproducible builds. It is not required for normal camera use, recording, or
+TeleopSession. Docker validates source + separately supplied SDK; camera
+access, udev, SDL, CUDA, and XR remain host-side tests.
 
 ```bash
 git archive --format=tar HEAD | sudo docker build --pull --no-cache \
