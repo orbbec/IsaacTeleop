@@ -32,6 +32,7 @@ table OrbbecCalibration {
   gyro_to_left: OrbbecExtrinsics (id: 7);
   raw_alignment_yaml: string (id: 8);
   raw_imu_yaml: string (id: 9);
+  capture_epoch: uint32 (id: 10);
 }
 
 table OrbbecCalibrationTracked { data: OrbbecCalibration (id: 0); }

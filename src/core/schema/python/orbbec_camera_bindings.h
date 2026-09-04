@@ -41,6 +41,7 @@ inline void bind_orbbec_camera(py::module& m)
         .def_readwrite("pixel_format", &FrameMetadataOrbbecT::pixel_format)
         .def_readwrite("encoded_bytes", &FrameMetadataOrbbecT::encoded_bytes)
         .def_readwrite("sdk_metadata", &FrameMetadataOrbbecT::sdk_metadata)
+        .def_readwrite("capture_epoch", &FrameMetadataOrbbecT::capture_epoch)
         .def("__repr__",
              [](const FrameMetadataOrbbecT& metadata)
              {
@@ -76,7 +77,8 @@ inline void bind_orbbec_camera(py::module& m)
         .def_readwrite("height", &OrbbecEncodedVideoFrameT::height)
         .def_readwrite("fps", &OrbbecEncodedVideoFrameT::fps)
         .def_readwrite("pixel_format", &OrbbecEncodedVideoFrameT::pixel_format)
-        .def_readwrite("encoded_data", &OrbbecEncodedVideoFrameT::encoded_data);
+        .def_readwrite("encoded_data", &OrbbecEncodedVideoFrameT::encoded_data)
+        .def_readwrite("capture_epoch", &OrbbecEncodedVideoFrameT::capture_epoch);
     py::class_<OrbbecEncodedVideoFrameRecordT, std::shared_ptr<OrbbecEncodedVideoFrameRecordT>>(
         m, "OrbbecEncodedVideoFrameRecord")
         .def(py::init<>())

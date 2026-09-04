@@ -11,6 +11,7 @@ from isaacteleop.schema import (
     OrbbecPcmAudioChunk,
     OrbbecCalibration,
     OrbbecCaptureHealth,
+    OrbbecConnectionState,
     OrbbecDevicePropertyValue,
     OrbbecDeviceState,
     OrbbecFrameMetadataEntry,
@@ -33,6 +34,7 @@ def test_orbbec_metadata_defaults_and_properties():
     metadata.fps = 30
     metadata.pixel_format = OrbbecPixelFormat.H265
     metadata.encoded_bytes = 123
+    metadata.capture_epoch = 3
     metadata.sdk_metadata = [OrbbecFrameMetadataEntry(1, 99)]
 
     assert metadata.stream == OrbbecCameraStream.ColorRight
@@ -40,6 +42,7 @@ def test_orbbec_metadata_defaults_and_properties():
     assert "ColorRight" in repr(metadata)
     assert metadata.pixel_format == OrbbecPixelFormat.H265
     assert metadata.sdk_metadata[0].value == 99
+    assert metadata.capture_epoch == 3
 
 
 def test_orbbec_record_keeps_timestamp():
@@ -56,34 +59,48 @@ def test_orbbec_ego_auxiliary_types():
     imu.sensor = OrbbecImuSensor.Gyro
     imu.sample_rate_hz = 1000
     imu.samples = [OrbbecImuSample(1, 2, 3, 24, 100, 200)]
+    imu.capture_epoch = 2
     assert imu.samples[0].z_si == 3
 
     audio = OrbbecAudioChunk()
     audio.sample_rate_hz = 48000
     audio.wav_data_offset = 44
+    audio.capture_epoch = 2
     assert audio.wav_data_offset == 44
+    assert audio.capture_epoch == 2
 
     calibration = OrbbecCalibration()
     calibration.device_uid = "ego"
+    calibration.capture_epoch = 2
     assert calibration.device_uid == "ego"
+    assert calibration.capture_epoch == 2
 
     state = OrbbecDeviceState()
     state.capture_health = OrbbecCaptureHealth.Warning
     state.failure_reason = "queue warning"
     state.queue_capacity = 4096
+    state.capture_epoch = 2
+    state.connection_state = OrbbecConnectionState.Recovered
+    state.reconnect_attempt = 4
     state.properties = [OrbbecDevicePropertyValue(279, 8_000_000)]
     assert state.properties[0].property_id == 279
     assert state.capture_health == OrbbecCaptureHealth.Warning
+    assert state.connection_state == OrbbecConnectionState.Recovered
+    assert state.reconnect_attempt == 4
 
 
 def test_orbbec_embedded_media_types():
     video = OrbbecEncodedVideoFrame()
     video.stream = OrbbecCameraStream.ColorRight
     video.encoded_data = [0, 0, 0, 1, 0x65]
+    video.capture_epoch = 2
     assert video.stream == OrbbecCameraStream.ColorRight
     assert video.encoded_data[-1] == 0x65
+    assert video.capture_epoch == 2
 
     audio = OrbbecPcmAudioChunk()
     audio.sample_rate_hz = 48000
     audio.pcm_data = [1, 0, 2, 0]
+    audio.capture_epoch = 2
     assert audio.pcm_data == [1, 0, 2, 0]
+    assert audio.capture_epoch == 2

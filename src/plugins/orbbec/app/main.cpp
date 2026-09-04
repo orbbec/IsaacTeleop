@@ -111,6 +111,9 @@ void print_usage(const char* program)
               << "  --width=N --height=N --fps=N  0 selects the SDK default profile\n"
               << "  --bitrate=N --dynamic-bitrate=on|off\n"
               << "  --device-uid=UID               Select a specific Orbbec device\n"
+              << "  --reconnect-timeout=N          Wait N seconds for the same physical device; 0 disables recovery "
+                 "(default 30)\n"
+              << "  --reconnect-interval-ms=N      Device re-enumeration interval (default 1000)\n"
               << "  --preview                      SDL side-by-side latest-frame preview\n"
               << "  --enable-imu --imu-rate=400|1000\n"
               << "  --accel-full-scale=<g> --gyro-full-scale=<dps>\n"
@@ -128,6 +131,9 @@ void print_usage(const char* program)
               << "  --set-property=SDK_PROPERTY_NAME=VALUE [--persist-controls]\n"
               << "  --calibration-output=PATH.json --list-capabilities\n"
               << "Ego has no quality property; use bitrate/dynamic-bitrate. Ego exposes no Depth/IR/point cloud.\n"
+              << "Advertised profiles are per sensor; capture validates the exact simultaneous combination without "
+                 "fallback.\n"
+              << "Encoded profiles above 30 FPS remain uncertified and are rejected after SDK profile resolution.\n"
               << "  --plugin-root-id=ID            Accepted for PluginManager compatibility\n";
 }
 
@@ -161,6 +167,10 @@ try
             capture_config.fps = std::stoul(argument.substr(6));
         else if (argument.rfind("--device-uid=", 0) == 0)
             capture_config.device_uid = argument.substr(13);
+        else if (argument.rfind("--reconnect-timeout=", 0) == 0)
+            capture_config.reconnect_timeout_seconds = std::stoul(argument.substr(20));
+        else if (argument.rfind("--reconnect-interval-ms=", 0) == 0)
+            capture_config.reconnect_interval_milliseconds = std::stoul(argument.substr(24));
         else if (argument.rfind("--bitrate=", 0) == 0)
             capture_config.bitrate = std::stoul(argument.substr(10));
         else if (argument.rfind("--dynamic-bitrate=", 0) == 0)
@@ -246,6 +256,8 @@ try
 #endif
     if (capture_config.imu_rate != 400 && capture_config.imu_rate != 1000)
         throw std::runtime_error("--imu-rate must be 400 or 1000");
+    if (capture_config.reconnect_interval_milliseconds == 0)
+        throw std::runtime_error("--reconnect-interval-ms must be greater than zero");
     const bool embedded_media = capture_config.mcap_media_mode == plugins::orbbec::McapMediaMode::Embedded;
     if (embedded_media && capture_config.collection_prefix.empty() && capture_config.mcap_filename.empty())
         throw std::runtime_error("--mcap-media=embedded requires --mcap-filename or --collection-prefix");

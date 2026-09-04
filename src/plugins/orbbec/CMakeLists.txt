@@ -45,6 +45,7 @@ endif()
 
 install(FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/plugin.yaml"
+    "${CMAKE_CURRENT_SOURCE_DIR}/orbbec_ego.example.toml"
     "${CMAKE_CURRENT_SOURCE_DIR}/README.md"
     "${ORBBEC_SDK_ROOT}/lib/OrbbecSDKConfig.xml"
     ${ORBBEC_SDK_LIBRARY_FILES}

@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <cmath>
 #include <condition_variable>
@@ -41,6 +42,7 @@
 #include <mutex>
 #include <sstream>
 #include <stdexcept>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <variant>
@@ -54,6 +56,18 @@ namespace
 constexpr size_t kMaxFlatbufferSize = core::ORBBEC_MAX_FLATBUFFER_SIZE;
 constexpr size_t kMaxQueuedEvents = 4096;
 constexpr size_t kMaxQueuedVideoFrameSets = 256;
+
+class RecoverableCaptureError : public std::runtime_error
+{
+public:
+    using std::runtime_error::runtime_error;
+};
+
+class FatalReconnectError : public std::runtime_error
+{
+public:
+    using std::runtime_error::runtime_error;
+};
 
 std::vector<float> yaml_numbers(const std::string& text)
 {
@@ -199,7 +213,14 @@ public:
     WavWriter() = default;
     ~WavWriter()
     {
-        close();
+        try
+        {
+            close();
+        }
+        catch (const std::exception& error)
+        {
+            std::cerr << "Orbbec WAV shutdown failed: " << error.what() << std::endl;
+        }
     }
     WavWriter(const WavWriter&) = delete;
     WavWriter& operator=(const WavWriter&) = delete;
@@ -216,6 +237,8 @@ public:
         channels_ = channels;
         bits_ = bits;
         write_header(0);
+        if (!file_)
+            throw std::runtime_error("Failed while writing Orbbec WAV header");
     }
 
     uint64_t write(const std::vector<uint8_t>& bytes)
@@ -228,6 +251,11 @@ public:
         return offset;
     }
 
+    bool is_open() const
+    {
+        return file_.is_open();
+    }
+
     void close()
     {
         if (!file_.is_open())
@@ -236,7 +264,12 @@ public:
             std::cerr << "WAV exceeded RIFF 32-bit size; header is truncated" << std::endl;
         file_.seekp(0);
         write_header(static_cast<uint32_t>(data_bytes_));
+        file_.flush();
+        bool failed = !file_;
         file_.close();
+        failed = failed || file_.fail();
+        if (failed)
+            throw std::runtime_error("Failed while finalizing Orbbec WAV output");
     }
 
 private:
@@ -467,6 +500,8 @@ void validate_property_value(const std::shared_ptr<ob::Device>& device,
 {
     if ((item.permission & OB_PERMISSION_WRITE) == 0)
         throw std::invalid_argument(std::string(item.name) + " is read-only");
+    if (!std::isfinite(value))
+        throw std::out_of_range(std::string(item.name) + " requires a finite value");
     switch (item.type)
     {
     case OB_BOOL_PROPERTY:
@@ -476,6 +511,8 @@ void validate_property_value(const std::shared_ptr<ob::Device>& device,
     case OB_INT_PROPERTY:
     {
         const auto range = device->getIntPropertyRange(item.id);
+        if (value < std::numeric_limits<int32_t>::min() || value > std::numeric_limits<int32_t>::max())
+            throw std::out_of_range(std::string(item.name) + " value is outside the int32 range");
         const auto integer = static_cast<int32_t>(value);
         if (validate_step && range.max > range.min && range.step > range.max - range.min)
         {
@@ -485,14 +522,27 @@ void validate_property_value(const std::shared_ptr<ob::Device>& device,
         }
         if (value != integer || integer < range.min || integer > range.max ||
             (validate_step && range.step > 0 && (integer - range.min) % range.step != 0))
-            throw std::out_of_range(std::string(item.name) + " value is outside its range or step");
+        {
+            throw std::out_of_range(std::string(item.name) + " requested=" + std::to_string(value) + " range=[" +
+                                    std::to_string(range.min) + "," + std::to_string(range.max) +
+                                    "] step=" + std::to_string(range.step));
+        }
         break;
     }
     case OB_FLOAT_PROPERTY:
     {
         const auto range = device->getFloatPropertyRange(item.id);
-        if (value < range.min || value > range.max)
-            throw std::out_of_range(std::string(item.name) + " value is outside its range");
+        const double tolerance =
+            std::max(std::max(1.0, std::abs(value)) * 1e-6, static_cast<double>(std::abs(range.step)) * 1e-6);
+        const double steps = range.step > 0 ? (value - range.min) / range.step : 0.0;
+        const double nearest = range.min + std::round(steps) * range.step;
+        if (value < range.min - tolerance || value > range.max + tolerance ||
+            (validate_step && range.step > 0 && std::abs(value - nearest) > tolerance))
+        {
+            throw std::out_of_range(std::string(item.name) + " requested=" + std::to_string(value) + " range=[" +
+                                    std::to_string(range.min) + "," + std::to_string(range.max) +
+                                    "] step=" + std::to_string(range.step));
+        }
         break;
     }
     default:
@@ -522,11 +572,35 @@ void write_property(const std::shared_ptr<ob::Device>& device,
     }
 }
 
+void verify_property_readback(const std::shared_ptr<ob::Device>& device,
+                              const OBPropertyItem& item,
+                              double requested,
+                              std::string_view operation)
+{
+    const double actual = read_property(device, item);
+    const double tolerance = item.type == OB_FLOAT_PROPERTY ? std::max(1.0, std::abs(requested)) * 1e-6 : 0.0;
+    if (std::abs(actual - requested) > tolerance)
+    {
+        throw std::runtime_error(std::string(item.name) + " " + std::string(operation) + " readback=" +
+                                 std::to_string(actual) + " differs from requested=" + std::to_string(requested));
+    }
+}
+
 void print_capabilities(const std::shared_ptr<ob::Device>& device)
 {
     const auto info = device->getDeviceInfo();
-    std::cout << info->getName() << " uid=" << info->getUid() << " vid=0x" << std::hex << info->getVid() << " pid=0x"
-              << info->getPid() << std::dec << " usb=" << info->getConnectionType() << std::endl;
+    std::cout << "SDK version=" << ob::Version::getMajor() << "." << ob::Version::getMinor() << "."
+              << ob::Version::getPatch() << " full=" << ob::Version::getVersion()
+              << " stage=" << ob::Version::getStageVersion() << std::endl;
+    std::cout << info->getName() << " uid=" << info->getUid() << " serial=" << info->getSerialNumber()
+              << " firmware=" << info->getFirmwareVersion() << " vid=0x" << std::hex << info->getVid() << " pid=0x"
+              << info->getPid() << std::dec << " usb=" << info->getConnectionType()
+              << " global_timestamp_supported=" << std::boolalpha << device->isGlobalTimestampSupported() << std::endl;
+    std::cout << "Profiles are per-sensor advertisements; capture validates the exact simultaneous combination."
+              << std::endl;
+    std::cout << "Certification policy: encoded profiles above 30 FPS are advertised but rejected by this build; "
+                 "sustained recording validation must pass before they are enabled."
+              << std::endl;
     const auto sensors = device->getSensorList();
     for (uint32_t sensor_index = 0; sensor_index < sensors->getCount(); ++sensor_index)
     {
@@ -565,7 +639,7 @@ void print_capabilities(const std::shared_ptr<ob::Device>& device)
             std::cout << std::endl;
         }
     }
-    std::cout << "Properties:" << std::endl;
+    std::cout << "Properties (ranges can depend on the most recently active video profile):" << std::endl;
     for (int index = 0; index < device->getSupportedPropertyCount(); ++index)
     {
         const auto item = device->getSupportedProperty(static_cast<uint32_t>(index));
@@ -581,6 +655,11 @@ void print_capabilities(const std::shared_ptr<ob::Device>& device)
             {
                 const auto range = device->getFloatPropertyRange(item.id);
                 std::cout << " range=[" << range.min << "," << range.max << "] step=" << range.step;
+            }
+            if ((item.permission & OB_PERMISSION_READ) != 0 &&
+                (item.type == OB_BOOL_PROPERTY || item.type == OB_INT_PROPERTY || item.type == OB_FLOAT_PROPERTY))
+            {
+                std::cout << " value=" << read_property(device, item);
             }
         }
         catch (const ob::Error&)
@@ -634,6 +713,38 @@ std::shared_ptr<ob::VideoStreamProfile> select_profile(const std::shared_ptr<ob:
     }
 }
 
+using ActiveProfiles = std::map<core::OrbbecCameraStream, std::shared_ptr<ob::VideoStreamProfile>>;
+
+std::shared_ptr<ob::Config> make_video_config(const ActiveProfiles& profiles, const std::vector<StreamConfig>& streams)
+{
+    auto config = std::make_shared<ob::Config>();
+    for (const auto& [_, profile] : profiles)
+        config->enableStream(profile);
+    const bool has_interframe_video = std::any_of(streams.begin(), streams.end(),
+                                                  [](const StreamConfig& stream) {
+                                                      return stream.pixel_format == core::OrbbecPixelFormat_H264 ||
+                                                             stream.pixel_format == core::OrbbecPixelFormat_H265;
+                                                  });
+    config->setFrameAggregateOutputMode(has_interframe_video ? OB_FRAME_AGGREGATE_OUTPUT_COLOR_FRAME_REQUIRE :
+                                                               OB_FRAME_AGGREGATE_OUTPUT_ALL_TYPE_FRAME_REQUIRE);
+    return config;
+}
+
+std::string describe_profiles(const ActiveProfiles& profiles)
+{
+    std::ostringstream output;
+    bool first = true;
+    for (const auto& [stream, profile] : profiles)
+    {
+        if (!first)
+            output << ", ";
+        first = false;
+        output << core::EnumNameOrbbecCameraStream(stream) << "=" << profile->getWidth() << "x" << profile->getHeight()
+               << "@" << profile->getFps() << " " << ob::TypeHelper::convertOBFormatTypeToString(profile->getFormat());
+    }
+    return output.str();
+}
+
 class SchemaMetadataSink final : public IMetadataSink
 {
 public:
@@ -666,13 +777,18 @@ public:
 
     ~SchemaMetadataSink() override
     {
+        try
         {
-            std::lock_guard<std::mutex> lock(publish_mutex_);
-            stopping_ = true;
+            close();
         }
-        publish_wake_.notify_all();
-        if (publisher_.joinable())
-            publisher_.join();
+        catch (const std::exception& error)
+        {
+            std::cerr << "Orbbec SchemaPusher shutdown failed: " << error.what() << std::endl;
+        }
+        catch (...)
+        {
+            std::cerr << "Orbbec SchemaPusher shutdown failed: unknown error" << std::endl;
+        }
     }
 
     void on_frame_metadata(const CapturedFrame& frame) override
@@ -703,6 +819,20 @@ public:
     void on_device_state(const core::OrbbecDeviceStateT& state, int64_t local_ns, int64_t device_ns) override
     {
         enqueue(*device_state_pusher_, state, local_ns, device_ns);
+    }
+
+    void close() override
+    {
+        {
+            std::lock_guard<std::mutex> lock(publish_mutex_);
+            stopping_ = true;
+        }
+        publish_wake_.notify_all();
+        if (publisher_.joinable())
+            publisher_.join();
+        const auto failure = error();
+        if (!failure.empty())
+            throw std::runtime_error("Orbbec SchemaPusher failed: " + failure);
     }
 
     std::string error() const override
@@ -758,6 +888,8 @@ private:
     void enqueue_task(std::function<void()> task)
     {
         std::lock_guard<std::mutex> lock(publish_mutex_);
+        if (stopping_)
+            throw std::runtime_error("Orbbec SchemaPusher is already closed");
         if (!publish_error_.empty())
             throw std::runtime_error("Orbbec SchemaPusher failed: " + publish_error_);
         if (tasks_.size() >= kMaxQueuedEvents)
@@ -877,7 +1009,7 @@ public:
     {
         try
         {
-            close();
+            abort();
         }
         catch (const std::exception& error)
         {
@@ -902,6 +1034,24 @@ public:
         {
             // McapWriter retries close from its destructor unless it is reset.
             // Terminate after an I/O failure so an error-path footer retry cannot abort.
+            writer_.terminate();
+            closed_ = true;
+            throw;
+        }
+    }
+
+    void abort() override
+    {
+        if (closed_)
+            return;
+        try
+        {
+            writer_.close();
+            output_.end();
+            closed_ = true;
+        }
+        catch (...)
+        {
             writer_.terminate();
             closed_ = true;
             throw;
@@ -949,6 +1099,7 @@ public:
         data->fps = frame.metadata.fps;
         data->pixel_format = frame.metadata.pixel_format;
         data->encoded_data = frame.encoded_data;
+        data->capture_epoch = frame.metadata.capture_epoch;
         media_video_->write(video_indices_.at(data->stream),
                             timestamp(frame.sample_time_local_common_clock_ns, frame.sample_time_raw_device_clock_ns),
                             std::move(data));
@@ -1070,7 +1221,11 @@ public:
     }
     void close() override
     {
-        for_each([](auto& sink) { sink.close(); });
+        finish([](IMetadataSink& sink) { sink.close(); });
+    }
+    void abort() override
+    {
+        finish([](IMetadataSink& sink) { sink.abort(); });
     }
     std::string error() const override
     {
@@ -1081,6 +1236,35 @@ public:
     }
 
 private:
+    template <typename Finish>
+    void finish(Finish&& finish_sink)
+    {
+        std::string failures;
+        // Close local archive sinks before waiting on an external SchemaPusher.
+        // A stalled OpenXR consumer must not keep an otherwise complete spool partial.
+        for (size_t offset = 0; offset < sinks_.size(); ++offset)
+        {
+            const size_t index = sinks_.size() - offset - 1;
+            try
+            {
+                finish_sink(*sinks_[index]);
+            }
+            catch (const std::exception& error)
+            {
+                if (!failures.empty())
+                    failures += "; ";
+                failures += "sink " + std::to_string(index) + ": " + error.what();
+            }
+            catch (...)
+            {
+                if (!failures.empty())
+                    failures += "; ";
+                failures += "sink " + std::to_string(index) + ": unknown error";
+            }
+        }
+        if (!failures.empty())
+            throw std::runtime_error(failures);
+    }
     template <typename Function>
     void for_each(Function&& function)
     {
@@ -1094,13 +1278,27 @@ private:
 
 void validate_stream_config(const StreamConfig& stream, const CaptureConfig& config)
 {
-    const uint32_t fps = stream.fps != 0 ? stream.fps : config.fps;
-    if (fps > 30 &&
-        (stream.pixel_format == core::OrbbecPixelFormat_H264 || stream.pixel_format == core::OrbbecPixelFormat_H265))
+    static_cast<void>(config);
+    switch (stream.pixel_format)
     {
-        throw std::invalid_argument(
-            "H.264/H.265 above 30 FPS is not certified for raw bitstream integrity on Orbbec Ego. "
-            "Refusing the requested profile; use fps=30. The plugin never silently substitutes 30 FPS.");
+    case core::OrbbecPixelFormat_Mjpg:
+    case core::OrbbecPixelFormat_H264:
+    case core::OrbbecPixelFormat_H265:
+        return;
+    default:
+        throw std::invalid_argument("Unsupported Orbbec pixel format");
+    }
+}
+
+void validate_resolved_stream_config(const StreamConfig& stream, uint32_t resolved_fps)
+{
+    const bool encoded =
+        stream.pixel_format == core::OrbbecPixelFormat_H264 || stream.pixel_format == core::OrbbecPixelFormat_H265;
+    if (encoded && resolved_fps > 30)
+    {
+        throw std::invalid_argument("resolved encoded profile is " + std::to_string(resolved_fps) +
+                                    " FPS, but this build certifies encoded recording only through 30 FPS; "
+                                    "no profile fallback was attempted");
     }
 }
 
@@ -1160,9 +1358,37 @@ public:
         }
     }
 
+    void begin_capture_epoch()
+    {
+        for (auto& [_, writer] : writers_)
+            writer.begin_capture_epoch();
+    }
+
     IMetadataSink* metadata_sink()
     {
         return metadata_sink_.get();
+    }
+
+    void close_media()
+    {
+        std::string failures;
+        for (auto& [stream, writer] : writers_)
+        {
+            if (!writer.file || !writer.file->is_open())
+                continue;
+            writer.file->flush();
+            bool failed = !*writer.file;
+            writer.file->close();
+            failed = failed || writer.file->fail();
+            if (failed)
+            {
+                if (!failures.empty())
+                    failures += "; ";
+                failures += std::string(core::EnumNameOrbbecCameraStream(stream));
+            }
+        }
+        if (!failures.empty())
+            throw std::runtime_error("Failed while finalizing Orbbec media sidecars: " + failures);
     }
 
 private:
@@ -1187,13 +1413,63 @@ private:
             return 0;
         }
 
-        static bool is_orbbec_timestamp_sei(const std::vector<uint8_t>& bytes, size_t payload_begin, size_t payload_end)
+        static bool is_orbbec_timestamp_sei(const std::vector<uint8_t>& bytes,
+                                            size_t payload_begin,
+                                            size_t payload_end,
+                                            core::OrbbecPixelFormat format)
         {
-            static constexpr std::array<uint8_t, 11> kMarker = { 'O', 'R', 'B', 'B', 'E', 'C', ',', 'E', 'G', 'O', '_' };
-            return payload_end >= payload_begin + kMarker.size() &&
-                   std::search(bytes.begin() + static_cast<std::ptrdiff_t>(payload_begin),
-                               bytes.begin() + static_cast<std::ptrdiff_t>(payload_end), kMarker.begin(),
-                               kMarker.end()) != bytes.begin() + static_cast<std::ptrdiff_t>(payload_end);
+            const auto begin = bytes.begin() + static_cast<std::ptrdiff_t>(payload_begin);
+            const auto end = bytes.begin() + static_cast<std::ptrdiff_t>(payload_end);
+            static constexpr std::array<uint8_t, 11> kLegacyMarker = { 'O', 'R', 'B', 'B', 'E', 'C',
+                                                                       ',', 'E', 'G', 'O', '_' };
+            if (std::search(begin, end, kLegacyMarker.begin(), kLegacyMarker.end()) != end)
+                return true;
+
+            static constexpr std::string_view kEgo = "EGO";
+            static constexpr std::string_view kTimestamp = ",timestamp_us=";
+            static constexpr std::string_view kH264Frame = ",frameId=";
+            static constexpr std::string_view kH265Frame = ",frame_seq=";
+            const auto matches = [&bytes, payload_end](size_t& offset, std::string_view text)
+            {
+                if (offset + text.size() > payload_end ||
+                    !std::equal(text.begin(), text.end(), bytes.begin() + static_cast<std::ptrdiff_t>(offset)))
+                {
+                    return false;
+                }
+                offset += text.size();
+                return true;
+            };
+            const auto consume_decimal = [&bytes, payload_end](size_t& offset)
+            {
+                const size_t first = offset;
+                while (offset < payload_end && bytes[offset] >= '0' && bytes[offset] <= '9')
+                    ++offset;
+                return offset != first;
+            };
+
+            for (auto marker = std::search(begin, end, kEgo.begin(), kEgo.end()); marker != end;
+                 marker = std::search(marker + 1, end, kEgo.begin(), kEgo.end()))
+            {
+                size_t offset = static_cast<size_t>(std::distance(bytes.begin(), marker));
+                if (!matches(offset, kEgo))
+                    continue;
+                const size_t digits_begin = offset;
+                if (!consume_decimal(offset) || offset - digits_begin != 10 || offset + 2 > payload_end ||
+                    bytes[offset] != '_' || (bytes[offset + 1] != 'L' && bytes[offset + 1] != 'R'))
+                {
+                    continue;
+                }
+                offset += 2;
+                if (!matches(offset, kTimestamp) || !consume_decimal(offset) ||
+                    !matches(offset, format == core::OrbbecPixelFormat_H264 ? kH264Frame : kH265Frame) ||
+                    !consume_decimal(offset))
+                {
+                    continue;
+                }
+                if (offset + 1 == payload_end && bytes[offset] == 0x80)
+                    return true;
+            }
+            return false;
         }
 
         std::vector<uint8_t> remove_orbbec_timestamp_sei(const std::vector<uint8_t>& bytes) const
@@ -1218,7 +1494,7 @@ private:
                                                                                   (bytes[nal_begin] >> 1U) & 0x3fU;
                 const bool is_sei =
                     format == core::OrbbecPixelFormat_H264 ? nal_type == 6 : nal_type == 39 || nal_type == 40;
-                if (!is_sei || !is_orbbec_timestamp_sei(bytes, nal_begin + 1, next))
+                if (!is_sei || !is_orbbec_timestamp_sei(bytes, nal_begin + 1, next, format))
                     result.insert(result.end(), bytes.begin() + static_cast<std::ptrdiff_t>(current),
                                   bytes.begin() + static_cast<std::ptrdiff_t>(next));
                 current = next;
@@ -1281,6 +1557,15 @@ private:
             // decodable elementary-video access unit and must not be appended to media.
             return parameter_sets_ready && picture;
         }
+
+        void begin_capture_epoch()
+        {
+            parameter_sets_ready = false;
+            has_vps = false;
+            has_sps = false;
+            has_pps = false;
+            has_sequence = false;
+        }
     };
 
     std::map<core::OrbbecCameraStream, Writer> writers_;
@@ -1301,15 +1586,31 @@ void FrameSink::on_frame(const CapturedFrame& frame)
     impl_->on_frame(frame);
 }
 
+void FrameSink::begin_capture_epoch()
+{
+    impl_->begin_capture_epoch();
+}
+
 IMetadataSink* FrameSink::metadata_sink()
 {
     return impl_->metadata_sink();
+}
+
+void FrameSink::close_media()
+{
+    impl_->close_media();
 }
 
 void FrameSink::close_metadata()
 {
     if (auto* sink = impl_->metadata_sink())
         sink->close();
+}
+
+void FrameSink::abort_metadata()
+{
+    if (auto* sink = impl_->metadata_sink())
+        sink->abort();
 }
 
 std::string FrameSink::metadata_error() const
@@ -1397,58 +1698,475 @@ public:
         }
         if (!device_)
             throw std::runtime_error("No Orbbec device matches the requested UID and ColorLeft/ColorRight sensors.");
+        const auto selected_info = device_->getDeviceInfo();
+        selected_device_uid_ = selected_info->getUid();
+        selected_device_serial_ = selected_info->getSerialNumber();
+        selected_device_vid_ = selected_info->getVid();
+        selected_device_pid_ = selected_info->getPid();
+        selected_firmware_ = selected_info->getFirmwareVersion();
+
+        for (const auto& stream : streams_)
+        {
+            const auto profile = select_profile(device_, stream, config);
+            active_profiles_.emplace(stream.camera, profile);
+        }
+        initial_profile_description_ = describe_profiles(active_profiles_);
+        try
+        {
+            for (const auto& stream : streams_)
+                validate_resolved_stream_config(stream, active_profiles_.at(stream.camera)->getFps());
+        }
+        catch (const std::exception& error)
+        {
+            throw std::runtime_error("Orbbec uid=" + selected_device_uid_ + " firmware=" + selected_firmware_ +
+                                     " resolved profiles [" + describe_profiles(active_profiles_) +
+                                     "] are not certified: " + error.what());
+        }
+        const auto pipeline_config = make_video_config(active_profiles_, streams_);
 
         std::vector<PropertySetting> settings = config.properties;
         if (config.bitrate != 0)
             settings.push_back({ "OB_PROP_COLOR_BITRATE_INT", static_cast<double>(config.bitrate) });
         if (config.dynamic_bitrate_set)
             settings.push_back({ "OB_PROP_COLOR_DYNAMIC_BITRATE_ENABLE_BOOL", config.dynamic_bitrate ? 1.0 : 0.0 });
-        std::vector<std::pair<OBPropertyItem, double>> validated_settings;
-        validated_settings.reserve(settings.size());
-        for (const auto& setting : settings)
+        struct CaptureReadiness
         {
-            const auto item = find_property(device_, setting.name);
-            // Constructors do not run their destructor after a throw. Validate every
-            // requested setting before the first device write, so a later invalid
-            // control can never leave an earlier one applied.
-            validate_property_value(device_, item, setting.value);
-            validated_settings.emplace_back(item, setting.value);
-        }
-        for (const auto& [item, value] : validated_settings)
+            std::mutex mutex;
+            std::condition_variable wake;
+            std::vector<bool> seen;
+            std::vector<bool> active_seen;
+            std::string error;
+            std::atomic<bool> complete{ false };
+            std::atomic<bool> active_complete{ false };
+        };
+        struct ExpectedFrame
         {
-            if (!config.persist_controls && (item.permission & OB_PERMISSION_READ) != 0)
-                original_properties_.push_back({ item, read_property(device_, item) });
-            write_property(device_, item, value);
-            std::cout << "Set " << item.name << "=" << value << std::endl;
+            OBFrameType frame_type;
+            uint32_t width;
+            uint32_t height;
+            uint32_t fps;
+            OBFormat format;
+            std::string name;
+        };
+        std::vector<ExpectedFrame> expected_frames;
+        expected_frames.reserve(active_profiles_.size());
+        for (const auto& [stream, profile] : active_profiles_)
+        {
+            expected_frames.push_back({ to_ob_frame(stream), profile->getWidth(), profile->getHeight(), profile->getFps(),
+                                        profile->getFormat(), core::EnumNameOrbbecCameraStream(stream) });
         }
+        auto readiness = std::make_shared<CaptureReadiness>();
+        readiness->seen.resize(expected_frames.size());
+        readiness->active_seen.resize(expected_frames.size());
+        const auto wait_for_video_readiness = [this, &readiness, &expected_frames]
+        {
+            std::string readiness_error;
+            {
+                std::unique_lock<std::mutex> lock(readiness->mutex);
+                const bool ready = readiness->wake.wait_for(
+                    lock, std::chrono::seconds(10),
+                    [&readiness]
+                    { return readiness->complete.load(std::memory_order_acquire) || !readiness->error.empty(); });
+                if (!ready)
+                {
+                    readiness_error = "timed out waiting for";
+                    for (size_t index = 0; index < expected_frames.size(); ++index)
+                    {
+                        if (!readiness->seen[index])
+                            readiness_error += " " + expected_frames[index].name;
+                    }
+                }
+                else
+                    readiness_error = readiness->error;
+            }
+            if (!readiness_error.empty())
+            {
+                throw std::runtime_error("Orbbec uid=" + selected_device_uid_ + " firmware=" + selected_firmware_ +
+                                         " active profiles [" + describe_profiles(active_profiles_) +
+                                         "] failed readiness: " + readiness_error);
+            }
+        };
+        const auto wait_for_active_video_readiness = [this, &readiness, &expected_frames]
+        {
+            std::string readiness_error;
+            {
+                std::unique_lock<std::mutex> lock(readiness->mutex);
+                const bool ready = readiness->wake.wait_for(
+                    lock, std::chrono::seconds(10),
+                    [&readiness]
+                    { return readiness->active_complete.load(std::memory_order_acquire) || !readiness->error.empty(); });
+                if (!ready)
+                {
+                    readiness_error = "timed out waiting for post-boundary";
+                    for (size_t index = 0; index < expected_frames.size(); ++index)
+                    {
+                        if (!readiness->active_seen[index])
+                            readiness_error += " " + expected_frames[index].name;
+                    }
+                }
+                else
+                    readiness_error = readiness->error;
+            }
+            if (!readiness_error.empty())
+            {
+                throw std::runtime_error("Orbbec uid=" + selected_device_uid_ + " firmware=" + selected_firmware_ +
+                                         " active profiles [" + describe_profiles(active_profiles_) +
+                                         "] failed readiness: " + readiness_error);
+            }
+        };
+        try
+        {
+            if (!settings.empty())
+            {
+                try
+                {
+                    prepare_controls(settings);
+                }
+                catch (const std::exception& error)
+                {
+                    throw std::runtime_error("Orbbec uid=" + selected_device_uid_ + " firmware=" + selected_firmware_ +
+                                             " controls for profiles [" + describe_profiles(active_profiles_) +
+                                             "] failed: " + error.what());
+                }
+            }
+            capture_device_snapshot();
+            pipeline_ = std::make_unique<ob::Pipeline>(device_);
+#if defined(ORBBEC_ENABLE_PREVIEW)
+            if (config_.preview)
+                preview_ = std::make_unique<Preview>();
+#endif
+            publish_calibration(pipeline_config);
+            start_device_state();
+            if (config_.enable_imu)
+                start_imu();
+            if (config_.enable_audio || !config_.audio_output.empty())
+                start_audio();
+            wait_for_auxiliary_readiness();
+            try
+            {
+                pipeline_->start(
+                    pipeline_config,
+                    [this, readiness, expected_frames](std::shared_ptr<ob::FrameSet> frame_set)
+                    {
+                        if (!frame_set || !accepting_callbacks_.load(std::memory_order_acquire))
+                            return;
+                        const bool active_capture = capture_active_.load(std::memory_order_acquire);
+                        std::vector<bool> observed(expected_frames.size());
+                        std::string observation_error;
+                        if (!readiness->complete.load(std::memory_order_acquire) ||
+                            (active_capture && !readiness->active_complete.load(std::memory_order_acquire)))
+                        {
+                            try
+                            {
+                                for (size_t index = 0; index < expected_frames.size(); ++index)
+                                {
+                                    const auto& expected = expected_frames[index];
+                                    const auto raw_frame = frame_set->getFrame(expected.frame_type);
+                                    if (!raw_frame)
+                                        continue;
+                                    const auto frame = raw_frame->as<ob::VideoFrame>();
+                                    const auto profile =
+                                        frame ? frame->getStreamProfile()->as<ob::VideoStreamProfile>() : nullptr;
+                                    if (!frame || !profile || frame->getWidth() != expected.width ||
+                                        frame->getHeight() != expected.height ||
+                                        frame->getFormat() != expected.format || profile->getFps() != expected.fps)
+                                    {
+                                        observation_error =
+                                            "SDK returned a different active profile for " + expected.name;
+                                        if (frame && profile)
+                                        {
+                                            observation_error +=
+                                                ": actual=" + std::to_string(frame->getWidth()) + "x" +
+                                                std::to_string(frame->getHeight()) + "@" +
+                                                std::to_string(profile->getFps()) + " " +
+                                                ob::TypeHelper::convertOBFormatTypeToString(frame->getFormat());
+                                        }
+                                        break;
+                                    }
+                                    observed[index] = true;
+                                }
+                            }
+                            catch (const std::exception& error)
+                            {
+                                observation_error = error.what();
+                            }
+                            catch (...)
+                            {
+                                observation_error = "unknown error while inspecting a frameset";
+                            }
+                        }
+                        if (!observation_error.empty())
+                        {
+                            std::lock_guard<std::mutex> lock(readiness->mutex);
+                            readiness->error = std::move(observation_error);
+                            readiness->wake.notify_one();
+                            return;
+                        }
+                        const auto report_observed = [&readiness, &observed](bool active)
+                        {
+                            auto& complete = active ? readiness->active_complete : readiness->complete;
+                            auto& seen = active ? readiness->active_seen : readiness->seen;
+                            if (complete.load(std::memory_order_relaxed))
+                                return;
+                            std::lock_guard<std::mutex> lock(readiness->mutex);
+                            for (size_t index = 0; index < observed.size(); ++index)
+                                seen[index] = seen[index] || observed[index];
+                            if (std::all_of(seen.begin(), seen.end(), [](bool value) { return value; }))
+                            {
+                                complete.store(true, std::memory_order_release);
+                                readiness->wake.notify_one();
+                            }
+                        };
+                        if (!active_capture)
+                        {
+                            report_observed(false);
+                            return;
+                        }
+                        const int64_t arrival_time_local_common_clock_ns = core::os_monotonic_now_ns();
+                        {
+                            std::lock_guard<std::mutex> lock(video_queue_mutex_);
+                            if (!accepting_callbacks_.load(std::memory_order_relaxed))
+                                return;
+                            if (video_frame_sets_.size() >= kMaxQueuedVideoFrameSets)
+                            {
+                                ++auxiliary_stats_.dropped_video_frame_sets;
+                                {
+                                    std::lock_guard<std::mutex> readiness_lock(readiness->mutex);
+                                    readiness->error = "video callback queue filled before capture became ready";
+                                }
+                                readiness->wake.notify_one();
+                                set_async_error(
+                                    "Orbbec video callback queue is full; capture stopped to avoid silent loss");
+                                return;
+                            }
+                            video_frame_sets_.emplace_back(std::move(frame_set), arrival_time_local_common_clock_ns);
+                        }
+                        report_observed(true);
+                        video_queue_cv_.notify_one();
+                    });
+                video_pipeline_started_ = true;
+            }
+            catch (const ob::Error& error)
+            {
+                throw std::runtime_error("Orbbec uid=" + selected_device_uid_ + " firmware=" + selected_firmware_ +
+                                         " rejected simultaneous profiles [" + describe_profiles(active_profiles_) +
+                                         "]: " + error.what());
+            }
+            wait_for_video_readiness();
+            verify_active_controls();
+            capture_active_.store(true, std::memory_order_release);
+            capture_epoch_started_ns_ = core::os_monotonic_now_ns();
+            publish_periodic_device_state();
+            wait_for_active_video_readiness();
+            wait_for_active_auxiliary_readiness();
+            device_changed_callback_id_ = context_.registerDeviceChangedCallback(
+                [this](const std::shared_ptr<ob::DeviceList>& removed, const std::shared_ptr<ob::DeviceList>&)
+                {
+                    if (device_list_contains_uid(removed, selected_device_uid_))
+                        device_removed_.store(true, std::memory_order_release);
+                });
+            device_changed_callback_registered_ = true;
+            std::cout << "Orbbec pipeline started for " << selected_device_uid_ << std::endl;
+        }
+        catch (...)
+        {
+            try
+            {
+                shutdown(false);
+            }
+            catch (const std::exception& error)
+            {
+                std::cerr << "Orbbec cleanup after startup error failed: " << error.what() << std::endl;
+            }
+            throw;
+        }
+    }
 
-        pipeline_ = std::make_unique<ob::Pipeline>(device_);
-        auto pipeline_config = std::make_shared<ob::Config>();
-        for (const auto& stream : streams_)
+    ~Impl()
+    {
+        shutdown_noexcept(false);
+    }
+
+    static std::string stop_pipeline_noexcept(std::unique_ptr<ob::Pipeline>& pipeline, bool& started, const char* name) noexcept
+    {
+        if (!pipeline)
+            return {};
+        std::string failure;
+        if (started)
         {
-            const auto profile = select_profile(device_, stream, config);
-            active_profiles_.emplace(stream.camera, profile);
-            pipeline_config->enableStream(profile);
+            try
+            {
+                pipeline->stop();
+            }
+            catch (const std::exception& error)
+            {
+                failure = std::string("Orbbec ") + name + " pipeline stop failed: " + error.what();
+            }
+            catch (...)
+            {
+                failure = std::string("Orbbec ") + name + " pipeline stop failed: unknown error";
+            }
         }
-        // The SDK documents COLOR_FRAME_REQUIRE as the aggregation mode for
-        // inter-frame encoded color streams.  Its default ANY_SITUATION mode
-        // can emit incomplete H.264/H.265 frame sets and let the internal
-        // aggregate queue overflow before the pull consumer sees them.
-        const bool has_interframe_video = std::any_of(streams_.begin(), streams_.end(),
-                                                      [](const StreamConfig& stream) {
-                                                          return stream.pixel_format == core::OrbbecPixelFormat_H264 ||
-                                                                 stream.pixel_format == core::OrbbecPixelFormat_H265;
-                                                      });
-        pipeline_config->setFrameAggregateOutputMode(has_interframe_video ?
-                                                         OB_FRAME_AGGREGATE_OUTPUT_COLOR_FRAME_REQUIRE :
-                                                         OB_FRAME_AGGREGATE_OUTPUT_ALL_TYPE_FRAME_REQUIRE);
+        started = false;
+        pipeline.reset();
+        return failure;
+    }
+
+    static bool device_list_contains_uid(const std::shared_ptr<ob::DeviceList>& devices, const std::string& uid)
+    {
+        if (!devices)
+            return false;
+        for (uint32_t index = 0; index < devices->getCount(); ++index)
+        {
+            try
+            {
+                const auto candidate = devices->getDevice(index);
+                if (candidate && candidate->getDeviceInfo()->getUid() == uid)
+                    return true;
+            }
+            catch (const std::exception&)
+            {
+            }
+        }
+        return false;
+    }
+
+    bool is_selected_physical_device(const std::shared_ptr<ob::DeviceInfo>& info) const
+    {
+        if (!info)
+            return false;
+        // SDK 2.9.0 EGO UIDs include the USB enumeration address and can change after a physical reconnect.
+        if (!selected_device_serial_.empty())
+        {
+            return info->getSerialNumber() == selected_device_serial_ && info->getVid() == selected_device_vid_ &&
+                   info->getPid() == selected_device_pid_;
+        }
+        return info->getUid() == selected_device_uid_;
+    }
+
+    std::shared_ptr<ob::Device> find_selected_device()
+    {
+        const auto devices = context_.queryDeviceList();
+        for (uint32_t index = 0; index < devices->getCount(); ++index)
+        {
+            const auto candidate = devices->getDevice(index);
+            if (!is_selected_physical_device(candidate->getDeviceInfo()))
+                continue;
+            if (std::all_of(streams_.begin(), streams_.end(),
+                            [&candidate](const StreamConfig& stream)
+                            { return has_sensor(candidate, to_ob_sensor(stream.camera)); }))
+            {
+                return candidate;
+            }
+        }
+        return nullptr;
+    }
+
+    void publish_connection_state(core::OrbbecConnectionState connection_state, const std::string& reason)
+    {
+        core::OrbbecDeviceStateT state;
+        state.sequence_number = polled_state_sequence_++;
+        state.device_uid = selected_device_uid_;
+        state.capture_epoch = capture_epoch_;
+        state.connection_state = connection_state;
+        state.reconnect_attempt = auxiliary_stats_.reconnect_attempts;
+        state.capture_health = connection_state == core::OrbbecConnectionState_Failed ?
+                                   core::OrbbecCaptureHealth_Incomplete :
+                                   core::OrbbecCaptureHealth_Warning;
+        state.failure_reason = reason;
+        enqueue(DeviceStateEvent{ std::move(state), core::os_monotonic_now_ns() });
+        drain_events();
+    }
+
+    void reset_stream_readiness()
+    {
+        accel_ready_.store(false, std::memory_order_release);
+        gyro_ready_.store(false, std::memory_order_release);
+        audio_ready_.store(false, std::memory_order_release);
+        active_accel_ready_.store(false, std::memory_order_release);
+        active_gyro_ready_.store(false, std::memory_order_release);
+        active_audio_ready_.store(false, std::memory_order_release);
+        last_accel_arrival_ns_.store(0, std::memory_order_release);
+        last_gyro_arrival_ns_.store(0, std::memory_order_release);
+        last_audio_arrival_ns_.store(0, std::memory_order_release);
+        last_video_arrival_ns_.clear();
+    }
+
+    void stop_capture_for_reconnect()
+    {
+        accepting_callbacks_.store(false, std::memory_order_release);
+        capture_active_.store(false, std::memory_order_release);
+        try
+        {
+            if (device_)
+                device_->setEgoStateCallback({});
+        }
+        catch (const std::exception&)
+        {
+        }
+        const auto report_stop_error = [](const std::string& error)
+        {
+            if (!error.empty())
+                std::cerr << "Warning: " << error << std::endl;
+        };
+        report_stop_error(stop_pipeline_noexcept(pipeline_, video_pipeline_started_, "video"));
+        if (audio_sensor_)
+        {
+            if (audio_started_)
+            {
+                try
+                {
+                    audio_sensor_->stop();
+                }
+                catch (const std::exception& error)
+                {
+                    std::cerr << "Warning: Orbbec audio stop during reconnect failed: " << error.what() << std::endl;
+                }
+            }
+            audio_started_ = false;
+            audio_sensor_.reset();
+        }
+        report_stop_error(stop_pipeline_noexcept(imu_pipeline_, imu_pipeline_started_, "IMU"));
+        drain_video_frames();
+        flush_imu(core::OrbbecImuSensor_Accel);
+        flush_imu(core::OrbbecImuSensor_Gyro);
+        drain_events();
+        active_profiles_.clear();
+        device_.reset();
+        reset_stream_readiness();
+    }
+
+    void begin_recovery(const std::string& reason)
+    {
+        if (config_.reconnect_timeout_seconds == 0)
+            throw RecoverableCaptureError(reason + "; automatic reconnect is disabled");
+        if (recovering_)
+            return;
+        recovering_ = true;
+        recovery_reason_ = reason;
+        recovery_last_error_.clear();
+        const auto now = std::chrono::steady_clock::now();
+        recovery_deadline_ = now + std::chrono::seconds(config_.reconnect_timeout_seconds);
+        next_reconnect_attempt_ = now;
+        publish_connection_state(core::OrbbecConnectionState_Recovering, reason);
+        std::cerr << "Orbbec device serial=" << selected_device_serial_ << " uid=" << selected_device_uid_
+                  << " disconnected; waiting up to " << config_.reconnect_timeout_seconds
+                  << " seconds for the same physical device" << std::endl;
+        stop_capture_for_reconnect();
+    }
+
+    void start_recovered_video(const std::shared_ptr<ob::Config>& pipeline_config)
+    {
+        pipeline_ = std::make_unique<ob::Pipeline>(device_);
         pipeline_->start(
             pipeline_config,
             [this](std::shared_ptr<ob::FrameSet> frame_set)
             {
-                if (!frame_set)
+                if (!frame_set || !accepting_callbacks_.load(std::memory_order_acquire) ||
+                    !capture_active_.load(std::memory_order_acquire))
+                {
                     return;
-                // Device-state polling can delay consumer processing; preserve the SDK delivery time.
+                }
                 const int64_t arrival_time_local_common_clock_ns = core::os_monotonic_now_ns();
                 {
                     std::lock_guard<std::mutex> lock(video_queue_mutex_);
@@ -1462,100 +2180,601 @@ public:
                 }
                 video_queue_cv_.notify_one();
             });
-        std::cout << "Orbbec pipeline started for " << device_->getDeviceInfo()->getUid() << std::endl;
-
-#if defined(ORBBEC_ENABLE_PREVIEW)
-        if (config_.preview)
-            preview_ = std::make_unique<Preview>();
-#endif
-
-        publish_calibration(pipeline_config);
-        start_device_state();
-        if (config_.enable_imu)
-            start_imu();
-        if (config_.enable_audio || !config_.audio_output.empty())
-            start_audio();
-        poll_device_state();
+        video_pipeline_started_ = true;
     }
 
-    ~Impl()
+    void reapply_controls()
     {
-        shutdown_noexcept();
-    }
-
-    void close()
-    {
-        shutdown();
-    }
-
-    void shutdown()
-    {
-        if (shutdown_complete_)
-            return;
         try
         {
-            device_->setEgoStateCallback({});
+            for (const auto& setting : requested_controls_)
+            {
+                const auto item = find_property(device_, setting.name);
+                validate_property_value(device_, item, setting.value);
+                write_property(device_, item, setting.value);
+                if ((item.permission & OB_PERMISSION_READ) != 0)
+                    verify_property_readback(device_, item, setting.value, "reconnect");
+            }
         }
-        catch (const ob::Error&)
+        catch (const std::exception& error)
         {
+            throw FatalReconnectError("failed to restore requested controls: " + std::string(error.what()));
         }
-        if (audio_sensor_)
+    }
+
+    void wait_for_recovered_video_readiness()
+    {
+        const auto ready = [this]
         {
-            try
-            {
-                audio_sensor_->stop();
-            }
-            catch (const ob::Error&)
-            {
-            }
-        }
-        if (imu_pipeline_)
-        {
-            try
-            {
-                imu_pipeline_->stop();
-            }
-            catch (const ob::Error&)
-            {
-            }
-        }
-        // Restore controls while the video pipeline is still alive. On Ego, writing
-        // controls after Pipeline::stop() can leave an SDK worker joinable during
-        // Context teardown, which terminates the process before normal cleanup.
-        restore_properties();
-        if (pipeline_)
-        {
-            try
-            {
-                pipeline_->stop();
-            }
-            catch (const ob::Error& error)
-            {
-                std::cerr << "Orbbec pipeline stop failed: " << error.what() << std::endl;
-            }
-        }
-        try
+            return std::all_of(streams_.begin(), streams_.end(),
+                               [this](const StreamConfig& stream)
+                               { return stats_.at(stream.camera).epoch_frame_count > 0; });
+        };
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (!ready() && std::chrono::steady_clock::now() < deadline)
         {
             drain_video_frames();
-            flush_imu(core::OrbbecImuSensor_Accel);
-            flush_imu(core::OrbbecImuSensor_Gyro);
             drain_events();
-            wav_writer_.close();
-            sink_->close_metadata();
-            shutdown_complete_ = true;
+            if (const auto failure = sink_->metadata_error(); !failure.empty())
+                throw std::runtime_error("Orbbec metadata publication failed: " + failure);
+            std::lock_guard<std::mutex> lock(queue_mutex_);
+            if (!async_error_.empty())
+                throw std::runtime_error(async_error_);
+        }
+        if (ready())
+            return;
+        std::string missing;
+        for (const auto& stream : streams_)
+        {
+            if (stats_.at(stream.camera).epoch_frame_count == 0)
+                missing += " " + std::string(core::EnumNameOrbbecCameraStream(stream.camera));
+        }
+        throw std::runtime_error("Orbbec uid=" + selected_device_uid_ + " firmware=" + selected_firmware_ +
+                                 " active profiles [" + describe_profiles(active_profiles_) +
+                                 "] timed out waiting for video streams after reconnect:" + missing);
+    }
+
+    void wait_for_recovery_stability() const
+    {
+        const bool expect_audio = config_.enable_audio || !config_.audio_output.empty();
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+        const int64_t now = core::os_monotonic_now_ns();
+        const auto is_recent = [now](const std::atomic<int64_t>& arrival)
+        { return now - arrival.load(std::memory_order_acquire) <= 500'000'000LL; };
+        std::string stalled;
+        if (config_.enable_imu && !is_recent(last_accel_arrival_ns_))
+            stalled += " Accel";
+        if (config_.enable_imu && !is_recent(last_gyro_arrival_ns_))
+            stalled += " Gyro";
+        if (expect_audio && !is_recent(last_audio_arrival_ns_))
+            stalled += " Audio";
+        if (!stalled.empty())
+        {
+            throw std::runtime_error("Orbbec uid=" + selected_device_uid_ +
+                                     " auxiliary streams did not remain active during reconnect readiness:" + stalled);
+        }
+    }
+
+    void attempt_reconnect()
+    {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= recovery_deadline_)
+        {
+            std::string reason = "Orbbec device serial=" + selected_device_serial_ +
+                                 " last_uid=" + selected_device_uid_ + " did not recover within " +
+                                 std::to_string(config_.reconnect_timeout_seconds) + " seconds";
+            if (!recovery_last_error_.empty())
+                reason += "; last restart error: " + recovery_last_error_;
+            publish_connection_state(core::OrbbecConnectionState_Failed, reason);
+            throw std::runtime_error(reason);
+        }
+        if (now < next_reconnect_attempt_)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            return;
+        }
+        next_reconnect_attempt_ = now + std::chrono::milliseconds(config_.reconnect_interval_milliseconds);
+        ++auxiliary_stats_.reconnect_attempts;
+        try
+        {
+            auto recovered_device = find_selected_device();
+            if (!recovered_device)
+                return;
+            const auto recovered_info = recovered_device->getDeviceInfo();
+            const auto recovered_uid = recovered_info->getUid();
+            const auto firmware = recovered_info->getFirmwareVersion();
+            if (firmware != selected_firmware_)
+                throw FatalReconnectError("firmware changed from " + selected_firmware_ + " to " + firmware);
+            if (recovered_uid != selected_device_uid_)
+            {
+                std::cout << "Orbbec device serial=" << selected_device_serial_
+                          << " re-enumerated from uid=" << selected_device_uid_ << " to uid=" << recovered_uid
+                          << std::endl;
+            }
+            device_ = std::move(recovered_device);
+            selected_device_uid_ = recovered_uid;
+            for (const auto& stream : streams_)
+            {
+                const auto profile = select_profile(device_, stream, config_);
+                validate_resolved_stream_config(stream, profile->getFps());
+                active_profiles_.emplace(stream.camera, profile);
+            }
+            if (describe_profiles(active_profiles_) != initial_profile_description_)
+            {
+                throw FatalReconnectError("resolved profiles changed to [" + describe_profiles(active_profiles_) + "]");
+            }
+
+            accepting_callbacks_.store(true, std::memory_order_release);
+            reset_stream_readiness();
+            const auto pipeline_config = make_video_config(active_profiles_, streams_);
+            start_device_state();
+            if (config_.enable_imu)
+                start_imu();
+            if (config_.enable_audio || !config_.audio_output.empty())
+                start_audio();
+            wait_for_auxiliary_readiness();
+            start_recovered_video(pipeline_config);
+            reapply_controls();
+            wait_for_recovery_stability();
+            publish_calibration(pipeline_config);
+
+            ++capture_epoch_;
+            auxiliary_stats_.capture_epoch = capture_epoch_;
+            for (auto& [_, stats] : stats_)
+                stats.epoch_frame_count = 0;
+            sink_->begin_capture_epoch();
+            capture_epoch_started_ns_ = core::os_monotonic_now_ns();
+            capture_active_.store(true, std::memory_order_release);
+            wait_for_recovered_video_readiness();
+            wait_for_active_auxiliary_readiness();
+            publish_periodic_device_state();
+            ++auxiliary_stats_.successful_reconnects;
+            recovering_ = false;
+            device_removed_.store(false, std::memory_order_release);
+            publish_connection_state(core::OrbbecConnectionState_Recovered, recovery_reason_);
+            std::cout << "Orbbec device " << selected_device_uid_ << " recovered as capture epoch " << capture_epoch_
+                      << std::endl;
+        }
+        catch (const FatalReconnectError& error)
+        {
+            recovery_last_error_ = error.what();
+            try
+            {
+                stop_capture_for_reconnect();
+                publish_connection_state(core::OrbbecConnectionState_Failed, recovery_last_error_);
+            }
+            catch (const std::exception& cleanup_error)
+            {
+                recovery_last_error_ += "; cleanup failed: " + std::string(cleanup_error.what());
+            }
+            throw std::runtime_error("Orbbec reconnect cannot safely continue: " + recovery_last_error_);
+        }
+        catch (const std::exception& error)
+        {
+            recovery_last_error_ = error.what();
+            const auto sink_failure = sink_->metadata_error();
+            std::cerr << "Orbbec reconnect attempt " << auxiliary_stats_.reconnect_attempts
+                      << " failed: " << recovery_last_error_ << std::endl;
+            try
+            {
+                stop_capture_for_reconnect();
+            }
+            catch (const std::exception& cleanup_error)
+            {
+                recovery_last_error_ += "; cleanup failed: " + std::string(cleanup_error.what());
+            }
+            if (!sink_failure.empty())
+                throw std::runtime_error("Orbbec metadata publication failed during reconnect: " + sink_failure);
+        }
+    }
+
+    void prepare_controls(const std::vector<PropertySetting>& settings)
+    {
+        requested_controls_.clear();
+        for (const auto& setting : settings)
+        {
+            const auto expected = std::find_if(requested_controls_.begin(), requested_controls_.end(),
+                                               [&setting](const auto& current) { return current.name == setting.name; });
+            if (expected == requested_controls_.end())
+                requested_controls_.push_back(setting);
+            else
+                *expected = setting;
+            const auto item = find_property(device_, setting.name);
+            if ((item.permission & OB_PERMISSION_WRITE) == 0)
+                throw std::invalid_argument(std::string(item.name) + " is read-only");
+            if (!config_.persist_controls && (item.permission & OB_PERMISSION_READ) == 0)
+            {
+                throw std::invalid_argument(std::string(item.name) +
+                                            " is write-only; use --persist-controls to acknowledge it cannot be restored");
+            }
+            if (!config_.persist_controls &&
+                std::none_of(original_properties_.begin(), original_properties_.end(),
+                             [&setting](const PropertySetting& original) { return original.name == setting.name; }))
+            {
+                original_properties_.push_back({ setting.name, read_property(device_, item) });
+            }
+        }
+
+        struct PreflightProfile
+        {
+            OBFrameType frame_type;
+            uint32_t width;
+            uint32_t height;
+            uint32_t fps;
+            OBFormat format;
+            std::string name;
+        };
+        std::vector<PreflightProfile> expected_profiles;
+        expected_profiles.reserve(active_profiles_.size());
+        for (const auto& [stream, profile] : active_profiles_)
+        {
+            expected_profiles.push_back({ to_ob_frame(stream), profile->getWidth(), profile->getHeight(),
+                                          profile->getFps(), profile->getFormat(),
+                                          core::EnumNameOrbbecCameraStream(stream) });
+        }
+        struct PreflightState
+        {
+            std::mutex mutex;
+            std::condition_variable wake;
+            std::vector<bool> seen;
+            std::string error;
+            bool accepting = true;
+        };
+        auto preflight_state = std::make_shared<PreflightState>();
+        preflight_state->seen.resize(expected_profiles.size());
+        auto preflight = std::make_unique<ob::Pipeline>(device_);
+        bool preflight_started = false;
+        try
+        {
+            // EGO encoded streams can time out in SDK pull mode while callback delivery works,
+            // so control preflight mirrors the capture callback path.
+            preflight->start(
+                make_video_config(active_profiles_, streams_),
+                [preflight_state, expected_profiles](std::shared_ptr<ob::FrameSet> frame_set)
+                {
+                    if (!frame_set)
+                        return;
+                    std::lock_guard<std::mutex> lock(preflight_state->mutex);
+                    if (!preflight_state->accepting)
+                        return;
+                    try
+                    {
+                        for (size_t index = 0; index < expected_profiles.size(); ++index)
+                        {
+                            const auto& expected = expected_profiles[index];
+                            const auto raw_frame = frame_set->getFrame(expected.frame_type);
+                            if (!raw_frame)
+                                continue;
+                            const auto frame = raw_frame->as<ob::VideoFrame>();
+                            if (!frame)
+                                continue;
+                            const auto profile = frame->getStreamProfile()->as<ob::VideoStreamProfile>();
+                            if (!profile || frame->getFormat() != expected.format || frame->getWidth() != expected.width ||
+                                frame->getHeight() != expected.height || profile->getFps() != expected.fps)
+                            {
+                                preflight_state->error = "SDK returned a different profile for " + expected.name;
+                                break;
+                            }
+                            preflight_state->seen[index] = true;
+                        }
+                    }
+                    catch (const std::exception& error)
+                    {
+                        preflight_state->error = error.what();
+                    }
+                    const bool complete = std::all_of(
+                        preflight_state->seen.begin(), preflight_state->seen.end(), [](bool seen) { return seen; });
+                    if (complete || !preflight_state->error.empty())
+                        preflight_state->wake.notify_one();
+                });
+            preflight_started = true;
+            std::string preflight_error;
+            {
+                std::unique_lock<std::mutex> lock(preflight_state->mutex);
+                const bool finished = preflight_state->wake.wait_for(
+                    lock, std::chrono::seconds(10),
+                    [&preflight_state]
+                    {
+                        return !preflight_state->error.empty() ||
+                               std::all_of(preflight_state->seen.begin(), preflight_state->seen.end(),
+                                           [](bool seen) { return seen; });
+                    });
+                if (!finished)
+                {
+                    preflight_error = "timed out waiting for";
+                    for (size_t index = 0; index < expected_profiles.size(); ++index)
+                    {
+                        if (!preflight_state->seen[index])
+                            preflight_error += " " + expected_profiles[index].name;
+                    }
+                }
+                else
+                    preflight_error = preflight_state->error;
+                preflight_state->accepting = false;
+            }
+            if (!preflight_error.empty())
+                throw std::runtime_error(preflight_error);
+        }
+        catch (const std::exception& error)
+        {
+            {
+                std::lock_guard<std::mutex> lock(preflight_state->mutex);
+                preflight_state->accepting = false;
+            }
+            const auto stop_error = stop_pipeline_noexcept(preflight, preflight_started, "control preflight");
+            original_properties_.clear();
+            std::string message = "Orbbec uid=" + selected_device_uid_ + " firmware=" + selected_firmware_ +
+                                  " control preflight rejected simultaneous profiles [" +
+                                  describe_profiles(active_profiles_) + "]: " + error.what();
+            if (!stop_error.empty())
+                message += "; " + stop_error;
+            throw std::runtime_error(message);
+        }
+        {
+            std::lock_guard<std::mutex> lock(preflight_state->mutex);
+            preflight_state->accepting = false;
+        }
+        if (const auto error = stop_pipeline_noexcept(preflight, preflight_started, "control preflight"); !error.empty())
+        {
+            original_properties_.clear();
+            throw std::runtime_error(error);
+        }
+
+        try
+        {
+            for (const auto& setting : settings)
+                validate_property_value(device_, find_property(device_, setting.name), setting.value);
+            for (const auto& setting : settings)
+            {
+                const auto item = find_property(device_, setting.name);
+                controls_applied_ = true;
+                write_property(device_, item, setting.value);
+                if ((item.permission & OB_PERMISSION_READ) != 0)
+                    verify_property_readback(device_, item, setting.value, "set");
+                std::cout << "Set " << item.name << "=" << setting.value << std::endl;
+            }
         }
         catch (...)
         {
-            shutdown_complete_ = true;
+            if (controls_applied_)
+            {
+                try
+                {
+                    restore_properties();
+                }
+                catch (const std::exception& error)
+                {
+                    std::cerr << "Failed to restore Orbbec controls after configuration error: " << error.what()
+                              << std::endl;
+                }
+            }
+            else
+                original_properties_.clear();
             throw;
         }
     }
 
-    void shutdown_noexcept() noexcept
+    void verify_active_controls()
+    {
+        for (const auto& setting : requested_controls_)
+        {
+            const auto item = find_property(device_, setting.name);
+            if ((item.permission & OB_PERMISSION_READ) == 0)
+                continue;
+            try
+            {
+                verify_property_readback(device_, item, setting.value, "active-profile");
+            }
+            catch (const std::exception& error)
+            {
+                throw std::runtime_error("Orbbec uid=" + selected_device_uid_ + " firmware=" + selected_firmware_ +
+                                         " active profiles [" + describe_profiles(active_profiles_) +
+                                         "] changed a requested control: " + error.what());
+            }
+        }
+    }
+
+    void capture_device_snapshot()
+    {
+        property_snapshot_.clear();
+        for (int index = 0; index < device_->getSupportedPropertyCount(); ++index)
+        {
+            const auto item = device_->getSupportedProperty(static_cast<uint32_t>(index));
+            if ((item.permission & OB_PERMISSION_READ) == 0 ||
+                (item.type != OB_BOOL_PROPERTY && item.type != OB_INT_PROPERTY && item.type != OB_FLOAT_PROPERTY))
+            {
+                continue;
+            }
+            try
+            {
+                property_snapshot_.emplace_back(static_cast<int32_t>(item.id), read_property(device_, item));
+            }
+            catch (const ob::Error&)
+            {
+            }
+        }
+        temperature_snapshot_c_ = std::numeric_limits<float>::quiet_NaN();
+        try
+        {
+            OBDeviceTemperature temperature{};
+            uint32_t size = sizeof(temperature);
+            device_->getStructuredData(OB_STRUCT_DEVICE_TEMPERATURE, reinterpret_cast<uint8_t*>(&temperature), &size);
+            if (size >= sizeof(temperature))
+                temperature_snapshot_c_ = temperature.imuTemp;
+        }
+        catch (const ob::Error&)
+        {
+        }
+    }
+
+    void reacquire_device()
+    {
+        const auto devices = context_.queryDeviceList();
+        for (uint32_t index = 0; index < devices->getCount(); ++index)
+        {
+            const auto candidate = devices->getDevice(index);
+            if (is_selected_physical_device(candidate->getDeviceInfo()))
+            {
+                device_ = candidate;
+                selected_device_uid_ = candidate->getDeviceInfo()->getUid();
+                return;
+            }
+        }
+        throw std::runtime_error("Orbbec device " + selected_device_uid_ + " disconnected before controls restored");
+    }
+
+    void close()
+    {
+        shutdown(true);
+    }
+
+    void shutdown(bool promote_metadata)
+    {
+        if (shutdown_complete_)
+            return;
+        accepting_callbacks_.store(false, std::memory_order_release);
+        capture_active_.store(false, std::memory_order_release);
+        std::string shutdown_error;
+        const auto remember_error = [&shutdown_error](const std::string& error)
+        {
+            if (error.empty())
+                return;
+            if (!shutdown_error.empty())
+                shutdown_error += "; ";
+            shutdown_error += error;
+        };
+        if (device_changed_callback_registered_)
+        {
+            try
+            {
+                context_.unregisterDeviceChangedCallback(device_changed_callback_id_);
+                device_changed_callback_registered_ = false;
+            }
+            catch (const std::exception& error)
+            {
+                remember_error(std::string("Orbbec device-change callback unregister failed: ") + error.what());
+            }
+        }
+        try
+        {
+            if (device_)
+                device_->setEgoStateCallback({});
+        }
+        catch (const ob::Error& error)
+        {
+            remember_error(std::string("Orbbec device-state callback clear failed: ") + error.what());
+        }
+        catch (...)
+        {
+            remember_error("Orbbec device-state callback clear failed: unknown error");
+        }
+        // Freeze callbacks before stopping producers so SDK stop latency cannot
+        // turn post-stop frames into queue overflow or a longer recording tail.
+        remember_error(stop_pipeline_noexcept(pipeline_, video_pipeline_started_, "video"));
+        if (audio_sensor_)
+        {
+            if (audio_started_)
+            {
+                try
+                {
+                    audio_sensor_->stop();
+                }
+                catch (const ob::Error& error)
+                {
+                    remember_error(std::string("Orbbec audio stop failed: ") + error.what());
+                }
+                catch (const std::exception& error)
+                {
+                    remember_error(std::string("Orbbec audio stop failed: ") + error.what());
+                }
+                catch (...)
+                {
+                    remember_error("Orbbec audio stop failed: unknown error");
+                }
+            }
+            audio_started_ = false;
+            audio_sensor_.reset();
+        }
+        remember_error(stop_pipeline_noexcept(imu_pipeline_, imu_pipeline_started_, "IMU"));
+        const auto finalize = [&remember_error](const char* operation, auto&& function)
+        {
+            try
+            {
+                function();
+            }
+            catch (const std::exception& error)
+            {
+                remember_error(std::string("Orbbec ") + operation + " failed: " + error.what());
+            }
+            catch (...)
+            {
+                remember_error(std::string("Orbbec ") + operation + " failed: unknown error");
+            }
+        };
+        finalize("video drain", [this] { drain_video_frames(); });
+        finalize("media sidecar close", [this] { sink_->close_media(); });
+        for (const auto& [stream, stats] : stats_)
+        {
+            if (stats.sequence_gaps != 0)
+            {
+                remember_error("Orbbec " + std::string(core::EnumNameOrbbecCameraStream(stream)) + " recorded " +
+                               std::to_string(stats.sequence_gaps) + " sequence gaps");
+            }
+        }
+        finalize("IMU flush",
+                 [this]
+                 {
+                     flush_imu(core::OrbbecImuSensor_Accel);
+                     flush_imu(core::OrbbecImuSensor_Gyro);
+                 });
+        finalize("event drain", [this] { drain_events(); });
+        uint64_t dropped_video_frame_sets = 0;
+        {
+            std::lock_guard<std::mutex> lock(video_queue_mutex_);
+            dropped_video_frame_sets = auxiliary_stats_.dropped_video_frame_sets;
+        }
+        if (dropped_video_frame_sets != 0)
+        {
+            remember_error("Orbbec capture dropped " + std::to_string(dropped_video_frame_sets) + " video frame sets");
+        }
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex_);
+            if (!async_error_.empty())
+                remember_error(async_error_);
+            if (auxiliary_stats_.dropped_events != 0)
+            {
+                remember_error("Orbbec capture dropped " + std::to_string(auxiliary_stats_.dropped_events) +
+                               " metadata events");
+            }
+        }
+        if (const auto failure = sink_->metadata_error(); !failure.empty())
+            remember_error("Orbbec metadata publication failed: " + failure);
+        finalize("WAV close", [this] { wav_writer_.close(); });
+        try
+        {
+            restore_properties();
+        }
+        catch (const std::exception& error)
+        {
+            remember_error(error.what());
+        }
+        if (promote_metadata && shutdown_error.empty())
+            finalize("metadata close", [this] { sink_->close_metadata(); });
+        else
+            finalize("metadata abort", [this] { sink_->abort_metadata(); });
+        shutdown_complete_ = true;
+        if (!shutdown_error.empty())
+            throw std::runtime_error(shutdown_error);
+    }
+
+    void shutdown_noexcept(bool promote_metadata) noexcept
     {
         try
         {
-            shutdown();
+            shutdown(promote_metadata);
         }
         catch (const std::exception& error)
         {
@@ -1567,46 +2786,104 @@ public:
         }
     }
 
-    void restore_properties() noexcept
+    void restore_properties()
     {
+        if (!controls_applied_ || original_properties_.empty())
+            return;
+        reacquire_device();
+        std::string restore_error;
         for (auto it = original_properties_.rbegin(); it != original_properties_.rend(); ++it)
         {
             try
             {
-                // Some Ego firmware reports an invalid brightness step (0..3
-                // with step 7). The captured device value is authoritative;
-                // preserve it instead of rejecting it with that bad step.
-                write_property(device_, it->first, it->second, false);
-                std::cout << "Restored " << it->first.name << "=" << it->second << std::endl;
+                const auto item = find_property(device_, it->name);
+                write_property(device_, item, it->value, false);
+                verify_property_readback(device_, item, it->value, "restore");
+                std::cout << "Restored " << item.name << "=" << it->value << std::endl;
             }
             catch (const std::exception& error)
             {
-                std::cerr << "Failed to restore " << it->first.name << ": " << error.what() << std::endl;
-            }
-            catch (...)
-            {
-                std::cerr << "Failed to restore " << it->first.name << ": unknown error" << std::endl;
+                if (!restore_error.empty())
+                    restore_error += "; ";
+                restore_error += "failed to restore " + it->name + ": " + error.what();
             }
         }
         original_properties_.clear();
+        controls_applied_ = false;
+        if (!restore_error.empty())
+            throw std::runtime_error(restore_error);
     }
 
     void update()
     {
+        if (recovering_)
         {
-            std::lock_guard<std::mutex> lock(queue_mutex_);
-            if (!async_error_.empty())
-                throw std::runtime_error(async_error_);
+            attempt_reconnect();
+            return;
         }
-        if (const auto error = sink_->metadata_error(); !error.empty())
-            throw std::runtime_error("Orbbec metadata publication failed: " + error);
-        drain_events();
-        drain_video_frames();
-        if (std::chrono::steady_clock::now() - last_device_poll_ >= std::chrono::seconds(5))
-            poll_device_state();
-        drain_events();
-        if (const auto error = sink_->metadata_error(); !error.empty())
-            throw std::runtime_error("Orbbec metadata publication failed: " + error);
+        try
+        {
+            if (device_removed_.load(std::memory_order_acquire))
+                throw RecoverableCaptureError("SDK reported removal of UID " + selected_device_uid_);
+            {
+                std::lock_guard<std::mutex> lock(queue_mutex_);
+                if (!async_error_.empty())
+                    throw std::runtime_error(async_error_);
+            }
+            if (const auto error = sink_->metadata_error(); !error.empty())
+                throw std::runtime_error("Orbbec metadata publication failed: " + error);
+            drain_events();
+            drain_video_frames();
+            validate_video_liveness();
+            validate_auxiliary_liveness();
+            if (std::chrono::steady_clock::now() - last_device_poll_ >= std::chrono::seconds(5))
+                publish_periodic_device_state();
+            drain_events();
+            if (const auto error = sink_->metadata_error(); !error.empty())
+                throw std::runtime_error("Orbbec metadata publication failed: " + error);
+        }
+        catch (const RecoverableCaptureError& error)
+        {
+            begin_recovery(error.what());
+        }
+    }
+
+    void validate_video_liveness() const
+    {
+        if (!capture_active_.load(std::memory_order_acquire))
+            return;
+        const int64_t now = core::os_monotonic_now_ns();
+        for (const auto& stream : streams_)
+        {
+            const auto observed = last_video_arrival_ns_.find(stream.camera);
+            const int64_t reference =
+                observed == last_video_arrival_ns_.end() ? capture_epoch_started_ns_ : observed->second;
+            if (now - reference > 5'000'000'000LL)
+            {
+                throw RecoverableCaptureError("Orbbec " + std::string(core::EnumNameOrbbecCameraStream(stream.camera)) +
+                                              " stopped delivering frames for five seconds");
+            }
+        }
+    }
+
+    void validate_auxiliary_liveness() const
+    {
+        if (!capture_active_.load(std::memory_order_acquire))
+            return;
+        const int64_t now = core::os_monotonic_now_ns();
+        const auto validate = [this, now](bool expected, const std::atomic<int64_t>& last_arrival, const char* name)
+        {
+            if (!expected)
+                return;
+            const int64_t observed = last_arrival.load(std::memory_order_acquire);
+            const int64_t reference = observed == 0 ? capture_epoch_started_ns_ : observed;
+            if (now - reference > 5'000'000'000LL)
+                throw RecoverableCaptureError(std::string("Orbbec ") + name +
+                                              " stopped delivering samples for five seconds");
+        };
+        validate(config_.enable_imu, last_accel_arrival_ns_, "Accel");
+        validate(config_.enable_imu, last_gyro_arrival_ns_, "Gyro");
+        validate(config_.enable_audio || !config_.audio_output.empty(), last_audio_arrival_ns_, "Audio");
     }
 
     void drain_video_frames()
@@ -1632,10 +2909,20 @@ public:
             if (!raw_frame)
                 continue;
             const auto frame = raw_frame->as<ob::VideoFrame>();
-            if (!frame || frame->getFormat() != to_ob_format(stream.pixel_format))
-                continue;
+            if (!frame)
+                throw std::runtime_error("Orbbec video frameset contained a non-video frame");
 
             const auto profile = frame->getStreamProfile()->as<ob::VideoStreamProfile>();
+            const auto expected = active_profiles_.at(stream.camera);
+            if (!profile || frame->getWidth() != expected->getWidth() || frame->getHeight() != expected->getHeight() ||
+                frame->getFormat() != expected->getFormat() || profile->getFps() != expected->getFps())
+            {
+                throw std::runtime_error(
+                    "Orbbec " + std::string(core::EnumNameOrbbecCameraStream(stream.camera)) +
+                    " delivered a frame outside the selected active profile " + std::to_string(expected->getWidth()) +
+                    "x" + std::to_string(expected->getHeight()) + "@" + std::to_string(expected->getFps()) + " " +
+                    ob::TypeHelper::convertOBFormatTypeToString(expected->getFormat()));
+            }
             CapturedFrame captured;
             captured.metadata.stream = stream.camera;
             captured.metadata.sequence_number = frame->getIndex();
@@ -1644,6 +2931,7 @@ public:
             captured.metadata.fps = profile->getFps();
             captured.metadata.pixel_format = stream.pixel_format;
             captured.metadata.encoded_bytes = frame->getDataSize();
+            captured.metadata.capture_epoch = capture_epoch_;
             for (int type = 0; type < OB_FRAME_METADATA_TYPE_COUNT; ++type)
             {
                 const auto metadata_type = static_cast<OBFrameMetadataType>(type);
@@ -1653,6 +2941,21 @@ public:
             captured.sample_time_local_common_clock_ns = arrival_time_local_common_clock_ns;
             captured.encoded_data.assign(frame->getData(), frame->getData() + frame->getDataSize());
             captured.sample_time_raw_device_clock_ns = static_cast<int64_t>(frame->getTimeStampUs()) * 1000;
+            auto& stats = stats_[stream.camera];
+            if (stats.epoch_frame_count > 0 && captured.metadata.sequence_number <= stats.last_sequence)
+            {
+                throw std::runtime_error(
+                    "Orbbec " + std::string(core::EnumNameOrbbecCameraStream(stream.camera)) +
+                    " delivered a non-increasing sequence: previous=" + std::to_string(stats.last_sequence) +
+                    " current=" + std::to_string(captured.metadata.sequence_number));
+            }
+            if (stats.epoch_frame_count > 0 && captured.sample_time_raw_device_clock_ns <= stats.last_device_timestamp_ns)
+            {
+                throw std::runtime_error("Orbbec " + std::string(core::EnumNameOrbbecCameraStream(stream.camera)) +
+                                         " delivered a non-increasing raw device timestamp: previous=" +
+                                         std::to_string(stats.last_device_timestamp_ns) +
+                                         " current=" + std::to_string(captured.sample_time_raw_device_clock_ns));
+            }
 #if defined(ORBBEC_ENABLE_PREVIEW)
             if (preview_)
                 preview_->submit({ stream.camera, stream.pixel_format, captured.metadata.width, captured.metadata.height,
@@ -1661,33 +2964,46 @@ public:
 #endif
             sink_->on_frame(captured);
 
-            auto& stats = stats_[stream.camera];
-            if (stats.frame_count > 0 && captured.metadata.sequence_number > stats.last_sequence + 1)
+            if (stats.epoch_frame_count > 0 && captured.metadata.sequence_number > stats.last_sequence + 1)
                 stats.sequence_gaps += captured.metadata.sequence_number - stats.last_sequence - 1;
             stats.frame_count++;
+            stats.epoch_frame_count++;
             stats.byte_count += captured.encoded_data.size();
             stats.last_sequence = captured.metadata.sequence_number;
             stats.last_device_timestamp_ns = captured.sample_time_raw_device_clock_ns;
+            last_video_arrival_ns_[stream.camera] = arrival_time_local_common_clock_ns;
         }
     }
 
     void print_stats() const
     {
         uint64_t dropped_video_frame_sets = 0;
+        AuxiliaryStats auxiliary_stats;
+        auxiliary_stats.accel_samples = auxiliary_stats_.accel_samples;
+        auxiliary_stats.gyro_samples = auxiliary_stats_.gyro_samples;
+        auxiliary_stats.audio_samples = auxiliary_stats_.audio_samples;
         {
             std::lock_guard<std::mutex> lock(video_queue_mutex_);
             dropped_video_frame_sets = auxiliary_stats_.dropped_video_frame_sets;
+        }
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex_);
+            auxiliary_stats.publish_queue_peak = auxiliary_stats_.publish_queue_peak;
+            auxiliary_stats.dropped_events = auxiliary_stats_.dropped_events;
         }
         for (const auto& [stream, stats] : stats_)
         {
             std::cout << "  " << core::EnumNameOrbbecCameraStream(stream) << ": " << stats.frame_count << " frames, "
                       << stats.byte_count << " bytes, " << stats.sequence_gaps << " sequence gaps" << std::endl;
         }
-        std::cout << "  IMU: accel=" << auxiliary_stats_.accel_samples << " gyro=" << auxiliary_stats_.gyro_samples
-                  << " samples; audio=" << auxiliary_stats_.audio_samples
-                  << " samples; queue_peak=" << auxiliary_stats_.publish_queue_peak
-                  << " dropped=" << auxiliary_stats_.dropped_events
-                  << " video_frame_sets_dropped=" << dropped_video_frame_sets << std::endl;
+        std::cout << "  IMU: accel=" << auxiliary_stats.accel_samples << " gyro=" << auxiliary_stats.gyro_samples
+                  << " samples; audio=" << auxiliary_stats.audio_samples
+                  << " samples; queue_peak=" << auxiliary_stats.publish_queue_peak
+                  << " dropped=" << auxiliary_stats.dropped_events
+                  << " video_frame_sets_dropped=" << dropped_video_frame_sets
+                  << "; capture_epoch=" << auxiliary_stats_.capture_epoch
+                  << " reconnect_attempts=" << auxiliary_stats_.reconnect_attempts
+                  << " successful_reconnects=" << auxiliary_stats_.successful_reconnects << std::endl;
     }
 
     const std::map<core::OrbbecCameraStream, StreamStats>& stats() const
@@ -1786,6 +3102,7 @@ public:
                         chunk.bits_per_sample = audio_bits_;
                         chunk.sample_format = core::OrbbecAudioSampleFormat_S16LE;
                         chunk.byte_count = static_cast<uint32_t>(value.bytes.size());
+                        chunk.capture_epoch = capture_epoch_;
                         const uint32_t bytes_per_sample = audio_channels_ * audio_bits_ / 8;
                         chunk.sample_count = bytes_per_sample == 0 ? 0 : chunk.byte_count / bytes_per_sample;
                         if (!config_.audio_output.empty())
@@ -1802,6 +3119,7 @@ public:
                             pcm.sample_format = chunk.sample_format;
                             pcm.sample_count = chunk.sample_count;
                             pcm.pcm_data = std::move(value.bytes);
+                            pcm.capture_epoch = capture_epoch_;
                             metadata->on_pcm_audio_chunk(pcm, value.local_ns, value.device_ns);
                         }
                     }
@@ -1853,6 +3171,7 @@ public:
         batch.sample_rate_hz = config_.imu_rate;
         batch.full_scale =
             sensor == core::OrbbecImuSensor_Accel ? config_.accel_full_scale_g : config_.gyro_full_scale_dps;
+        batch.capture_epoch = capture_epoch_;
         batch.samples.swap(pending.samples);
         enqueue(ImuEvent{ std::move(batch), local_ns, device_ns });
     }
@@ -1863,29 +3182,49 @@ public:
         imu_config->enableAccelStream(accel_scale(config_.accel_full_scale_g), imu_rate(config_.imu_rate));
         imu_config->enableGyroStream(gyro_scale(config_.gyro_full_scale_dps), imu_rate(config_.imu_rate));
         imu_pipeline_ = std::make_unique<ob::Pipeline>(device_);
-        imu_pipeline_->start(imu_config,
-                             [this](std::shared_ptr<ob::FrameSet> frame_set)
-                             {
-                                 try
-                                 {
-                                     if (const auto raw = frame_set ? frame_set->getFrame(OB_FRAME_ACCEL) : nullptr)
-                                     {
-                                         const auto frame = raw->as<ob::AccelFrame>();
-                                         add_imu_sample(core::OrbbecImuSensor_Accel, frame->getValue(),
-                                                        frame->getTemperature(), frame->getTimeStampUs());
-                                     }
-                                     if (const auto raw = frame_set ? frame_set->getFrame(OB_FRAME_GYRO) : nullptr)
-                                     {
-                                         const auto frame = raw->as<ob::GyroFrame>();
-                                         add_imu_sample(core::OrbbecImuSensor_Gyro, frame->getValue(),
-                                                        frame->getTemperature(), frame->getTimeStampUs());
-                                     }
-                                 }
-                                 catch (const std::exception& error)
-                                 {
-                                     set_async_error(std::string("IMU callback failed: ") + error.what());
-                                 }
-                             });
+        imu_pipeline_->start(
+            imu_config,
+            [this](std::shared_ptr<ob::FrameSet> frame_set)
+            {
+                if (!accepting_callbacks_.load(std::memory_order_acquire))
+                    return;
+                try
+                {
+                    if (const auto raw = frame_set ? frame_set->getFrame(OB_FRAME_ACCEL) : nullptr)
+                    {
+                        last_accel_arrival_ns_.store(core::os_monotonic_now_ns(), std::memory_order_release);
+                        if (!accel_ready_.exchange(true, std::memory_order_acq_rel))
+                            auxiliary_readiness_wake_.notify_all();
+                        if (capture_active_.load(std::memory_order_acquire))
+                        {
+                            const auto frame = raw->as<ob::AccelFrame>();
+                            add_imu_sample(core::OrbbecImuSensor_Accel, frame->getValue(), frame->getTemperature(),
+                                           frame->getTimeStampUs());
+                            if (!active_accel_ready_.exchange(true, std::memory_order_acq_rel))
+                                auxiliary_readiness_wake_.notify_all();
+                        }
+                    }
+                    if (const auto raw = frame_set ? frame_set->getFrame(OB_FRAME_GYRO) : nullptr)
+                    {
+                        last_gyro_arrival_ns_.store(core::os_monotonic_now_ns(), std::memory_order_release);
+                        if (!gyro_ready_.exchange(true, std::memory_order_acq_rel))
+                            auxiliary_readiness_wake_.notify_all();
+                        if (capture_active_.load(std::memory_order_acquire))
+                        {
+                            const auto frame = raw->as<ob::GyroFrame>();
+                            add_imu_sample(core::OrbbecImuSensor_Gyro, frame->getValue(), frame->getTemperature(),
+                                           frame->getTimeStampUs());
+                            if (!active_gyro_ready_.exchange(true, std::memory_order_acq_rel))
+                                auxiliary_readiness_wake_.notify_all();
+                        }
+                    }
+                }
+                catch (const std::exception& error)
+                {
+                    set_async_error(std::string("IMU callback failed: ") + error.what());
+                }
+            });
+        imu_pipeline_started_ = true;
         std::cout << "Orbbec IMU started at " << config_.imu_rate << " Hz" << std::endl;
     }
 
@@ -1901,30 +3240,101 @@ public:
         audio_bits_ = static_cast<uint16_t>(profile->getBitsPerSample());
         if (audio_rate_ != 48000 || audio_channels_ != 1 || audio_bits_ != 16)
             throw std::runtime_error("Unsupported Ego audio profile; expected PCM 48000 Hz mono S16_LE");
-        if (!config_.audio_output.empty())
+        if (!config_.audio_output.empty() && !wav_writer_.is_open())
             wav_writer_.open(config_.audio_output, audio_rate_, audio_channels_, audio_bits_);
         audio_sensor_->start(profile,
                              [this](std::shared_ptr<ob::Frame> frame)
                              {
                                  try
                                  {
-                                     if (!frame)
+                                     if (!frame || !accepting_callbacks_.load(std::memory_order_acquire))
+                                         return;
+                                     if (!audio_ready_.exchange(true, std::memory_order_acq_rel))
+                                         auxiliary_readiness_wake_.notify_all();
+                                     const int64_t arrival_ns = core::os_monotonic_now_ns();
+                                     last_audio_arrival_ns_.store(arrival_ns, std::memory_order_release);
+                                     if (!capture_active_.load(std::memory_order_acquire))
                                          return;
                                      AudioEvent event;
                                      event.bytes.assign(frame->getData(), frame->getData() + frame->getDataSize());
-                                     event.local_ns = core::os_monotonic_now_ns();
+                                     event.local_ns = arrival_ns;
                                      event.device_ns = static_cast<int64_t>(frame->getTimeStampUs()) * 1000;
                                      enqueue(std::move(event));
+                                     if (!active_audio_ready_.exchange(true, std::memory_order_acq_rel))
+                                         auxiliary_readiness_wake_.notify_all();
                                  }
                                  catch (const std::exception& error)
                                  {
                                      set_async_error(std::string("Audio callback failed: ") + error.what());
                                  }
                              });
+        audio_started_ = true;
         std::cout << "Audio capture started";
         if (!config_.audio_output.empty())
             std::cout << "; sidecar WAV: " << config_.audio_output;
         std::cout << std::endl;
+    }
+
+    void wait_for_auxiliary_readiness()
+    {
+        const bool expect_audio = config_.enable_audio || !config_.audio_output.empty();
+        const auto ready = [this, expect_audio]
+        {
+            return (!config_.enable_imu ||
+                    (accel_ready_.load(std::memory_order_acquire) && gyro_ready_.load(std::memory_order_acquire))) &&
+                   (!expect_audio || audio_ready_.load(std::memory_order_acquire));
+        };
+        std::unique_lock<std::mutex> lock(auxiliary_readiness_mutex_);
+        if (auxiliary_readiness_wake_.wait_for(lock, std::chrono::seconds(10), ready))
+            return;
+        std::string missing;
+        if (config_.enable_imu && !accel_ready_.load(std::memory_order_relaxed))
+            missing += " Accel";
+        if (config_.enable_imu && !gyro_ready_.load(std::memory_order_relaxed))
+            missing += " Gyro";
+        if (expect_audio && !audio_ready_.load(std::memory_order_relaxed))
+            missing += " Audio";
+        throw std::runtime_error("Orbbec uid=" + selected_device_uid_ + " firmware=" + selected_firmware_ +
+                                 " active profiles [" + describe_profiles(active_profiles_) +
+                                 "] timed out waiting for auxiliary streams:" + missing);
+    }
+
+    void wait_for_active_auxiliary_readiness()
+    {
+        const bool expect_audio = config_.enable_audio || !config_.audio_output.empty();
+        const auto ready = [this, expect_audio]
+        {
+            return (!config_.enable_imu || (active_accel_ready_.load(std::memory_order_acquire) &&
+                                            active_gyro_ready_.load(std::memory_order_acquire))) &&
+                   (!expect_audio || active_audio_ready_.load(std::memory_order_acquire));
+        };
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (!ready() && std::chrono::steady_clock::now() < deadline)
+        {
+            drain_video_frames();
+            drain_events();
+            if (const auto failure = sink_->metadata_error(); !failure.empty())
+                throw std::runtime_error("Orbbec metadata publication failed: " + failure);
+            {
+                std::lock_guard<std::mutex> lock(queue_mutex_);
+                if (!async_error_.empty())
+                    throw std::runtime_error(async_error_);
+            }
+            std::unique_lock<std::mutex> lock(auxiliary_readiness_mutex_);
+            auxiliary_readiness_wake_.wait_for(lock, std::chrono::milliseconds(20), ready);
+        }
+        if (ready())
+            return;
+        std::string missing;
+        if (config_.enable_imu && !active_accel_ready_.load(std::memory_order_relaxed))
+            missing += " Accel";
+        if (config_.enable_imu && !active_gyro_ready_.load(std::memory_order_relaxed))
+            missing += " Gyro";
+        if (expect_audio && !active_audio_ready_.load(std::memory_order_relaxed))
+            missing += " Audio";
+        throw std::runtime_error("Orbbec uid=" + selected_device_uid_ + " firmware=" + selected_firmware_ +
+                                 " active profiles [" + describe_profiles(active_profiles_) +
+                                 "] timed out waiting for auxiliary streams after video became active:" + missing);
     }
 
     static std::shared_ptr<core::OrbbecCameraIntrinsicsT> camera_intrinsics(const OBCalibrationParam& param,
@@ -1960,6 +3370,7 @@ public:
     {
         core::OrbbecCalibrationT value;
         value.device_uid = device_->getDeviceInfo()->getUid();
+        value.capture_epoch = capture_epoch_ + (recovering_ ? 1U : 0U);
         std::string sdk_calibration_error;
         try
         {
@@ -2081,9 +3492,16 @@ public:
         device_->setEgoStateCallback(
             [this](const OBEgoStateReport& report)
             {
+                if (!accepting_callbacks_.load(std::memory_order_acquire))
+                    return;
+                if (!capture_active_.load(std::memory_order_acquire))
+                    return;
                 core::OrbbecDeviceStateT state;
                 state.sequence_number = report.sequence;
-                state.device_uid = device_->getDeviceInfo()->getUid();
+                state.device_uid = selected_device_uid_;
+                state.capture_epoch = capture_epoch_;
+                state.connection_state = core::OrbbecConnectionState_Connected;
+                state.reconnect_attempt = auxiliary_stats_.reconnect_attempts;
                 state.work_mode = report.work_state;
                 state.status_flags = report.state_flags;
                 state.error_flags = report.error_flags;
@@ -2093,21 +3511,42 @@ public:
             });
     }
 
-    void poll_device_state()
+    void publish_periodic_device_state()
     {
+        // Device removal callbacks and stream liveness own disconnect detection.
+        // A synchronous SDK identity query here can block capture draining for nearly a second.
         core::OrbbecDeviceStateT state;
         state.sequence_number = polled_state_sequence_++;
-        state.device_uid = device_->getDeviceInfo()->getUid();
+        state.device_uid = selected_device_uid_;
+        state.capture_epoch = capture_epoch_;
+        state.connection_state = core::OrbbecConnectionState_Connected;
+        state.reconnect_attempt = auxiliary_stats_.reconnect_attempts;
         state.temperature_c = std::numeric_limits<float>::quiet_NaN();
+        if (!device_snapshot_published_)
+        {
+            state.temperature_c = temperature_snapshot_c_;
+            state.properties = std::move(property_snapshot_);
+            device_snapshot_published_ = true;
+        }
+        uint64_t dropped_video_frame_sets = 0;
+        {
+            std::lock_guard<std::mutex> lock(video_queue_mutex_);
+            dropped_video_frame_sets = auxiliary_stats_.dropped_video_frame_sets;
+        }
         {
             std::lock_guard<std::mutex> lock(queue_mutex_);
             state.queue_capacity = static_cast<uint32_t>(kMaxQueuedEvents);
             state.queue_peak = static_cast<uint32_t>(auxiliary_stats_.publish_queue_peak);
             state.dropped_events = auxiliary_stats_.dropped_events;
-            if (!async_error_.empty() || state.dropped_events != 0)
+            if (!async_error_.empty() || state.dropped_events != 0 || dropped_video_frame_sets != 0)
             {
                 state.capture_health = core::OrbbecCaptureHealth_Incomplete;
-                state.failure_reason = async_error_.empty() ? "dropped metadata event" : async_error_;
+                if (!async_error_.empty())
+                    state.failure_reason = async_error_;
+                else if (state.dropped_events != 0)
+                    state.failure_reason = "dropped metadata event";
+                else
+                    state.failure_reason = "dropped video frame set";
             }
             else if (events_.size() >= kMaxQueuedEvents * 85 / 100)
             {
@@ -2116,31 +3555,6 @@ public:
             }
             else
                 state.capture_health = core::OrbbecCaptureHealth_Healthy;
-        }
-        for (int index = 0; index < device_->getSupportedPropertyCount(); ++index)
-        {
-            const auto item = device_->getSupportedProperty(static_cast<uint32_t>(index));
-            if ((item.permission & OB_PERMISSION_READ) == 0 ||
-                (item.type != OB_BOOL_PROPERTY && item.type != OB_INT_PROPERTY && item.type != OB_FLOAT_PROPERTY))
-                continue;
-            try
-            {
-                state.properties.emplace_back(static_cast<int32_t>(item.id), read_property(device_, item));
-            }
-            catch (const ob::Error&)
-            {
-            }
-        }
-        try
-        {
-            OBDeviceTemperature temperature{};
-            uint32_t size = sizeof(temperature);
-            device_->getStructuredData(OB_STRUCT_DEVICE_TEMPERATURE, reinterpret_cast<uint8_t*>(&temperature), &size);
-            if (size >= sizeof(temperature))
-                state.temperature_c = temperature.imuTemp;
-        }
-        catch (const ob::Error&)
-        {
         }
         const auto now = core::os_monotonic_now_ns();
         enqueue(DeviceStateEvent{ std::move(state), now });
@@ -2155,13 +3569,16 @@ private:
     std::unique_ptr<ob::Pipeline> imu_pipeline_;
     std::shared_ptr<ob::Sensor> audio_sensor_;
     std::vector<StreamConfig> streams_;
-    std::map<core::OrbbecCameraStream, std::shared_ptr<ob::VideoStreamProfile>> active_profiles_;
+    ActiveProfiles active_profiles_;
     std::unique_ptr<FrameSink> sink_;
 #if defined(ORBBEC_ENABLE_PREVIEW)
     std::unique_ptr<Preview> preview_;
 #endif
     std::map<core::OrbbecCameraStream, StreamStats> stats_;
-    std::vector<std::pair<OBPropertyItem, double>> original_properties_;
+    std::map<core::OrbbecCameraStream, int64_t> last_video_arrival_ns_;
+    std::vector<PropertySetting> original_properties_;
+    std::vector<PropertySetting> requested_controls_;
+    std::vector<core::OrbbecDevicePropertyValue> property_snapshot_;
     AuxiliaryStats auxiliary_stats_;
     WavWriter wav_writer_;
     uint32_t audio_rate_ = 0;
@@ -2176,8 +3593,43 @@ private:
     std::deque<std::pair<std::shared_ptr<ob::FrameSet>, int64_t>> video_frame_sets_;
     std::deque<PublishEvent> events_;
     std::string async_error_;
+    std::string selected_device_uid_;
+    std::string selected_device_serial_;
+    uint16_t selected_device_vid_ = 0;
+    uint16_t selected_device_pid_ = 0;
+    std::string selected_firmware_;
+    std::string initial_profile_description_;
+    std::string recovery_reason_;
+    std::string recovery_last_error_;
+    float temperature_snapshot_c_ = std::numeric_limits<float>::quiet_NaN();
+    bool device_snapshot_published_ = false;
     uint64_t polled_state_sequence_ = 0;
     std::chrono::steady_clock::time_point last_device_poll_{};
+    std::chrono::steady_clock::time_point recovery_deadline_{};
+    std::chrono::steady_clock::time_point next_reconnect_attempt_{};
+    int64_t capture_epoch_started_ns_ = 0;
+    uint32_t capture_epoch_ = 0;
+    OBCallbackId device_changed_callback_id_ = 0;
+    std::atomic<bool> accepting_callbacks_{ true };
+    std::atomic<bool> capture_active_{ false };
+    std::atomic<bool> device_removed_{ false };
+    std::atomic<bool> accel_ready_{ false };
+    std::atomic<bool> gyro_ready_{ false };
+    std::atomic<bool> audio_ready_{ false };
+    std::atomic<bool> active_accel_ready_{ false };
+    std::atomic<bool> active_gyro_ready_{ false };
+    std::atomic<bool> active_audio_ready_{ false };
+    std::atomic<int64_t> last_accel_arrival_ns_{ 0 };
+    std::atomic<int64_t> last_gyro_arrival_ns_{ 0 };
+    std::atomic<int64_t> last_audio_arrival_ns_{ 0 };
+    std::mutex auxiliary_readiness_mutex_;
+    std::condition_variable auxiliary_readiness_wake_;
+    bool video_pipeline_started_ = false;
+    bool imu_pipeline_started_ = false;
+    bool audio_started_ = false;
+    bool controls_applied_ = false;
+    bool device_changed_callback_registered_ = false;
+    bool recovering_ = false;
     bool shutdown_complete_ = false;
 };
 

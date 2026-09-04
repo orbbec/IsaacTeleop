@@ -28,6 +28,7 @@ table FrameMetadataOrbbec {
   pixel_format: OrbbecPixelFormat (id: 5);
   encoded_bytes: uint64 (id: 6);
   sdk_metadata: [OrbbecFrameMetadataEntry] (id: 7);
+  capture_epoch: uint32 (id: 8);
 }
 
 // In-memory tracker wrapper. data is null before a sample arrives.
@@ -52,6 +53,7 @@ table OrbbecEncodedVideoFrame {
   fps: uint32 (id: 4);
   pixel_format: OrbbecPixelFormat (id: 5);
   encoded_data: [ubyte] (id: 6);
+  capture_epoch: uint32 (id: 7);
 }
 
 table OrbbecEncodedVideoFrameRecord {

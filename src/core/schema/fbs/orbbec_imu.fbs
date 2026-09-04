@@ -22,6 +22,7 @@ table OrbbecImuBatch {
   sample_rate_hz: uint32 (id: 2);
   full_scale: float (id: 3);
   samples: [OrbbecImuSample] (id: 4);
+  capture_epoch: uint32 (id: 5);
 }
 
 table OrbbecImuBatchTracked { data: OrbbecImuBatch (id: 0); }

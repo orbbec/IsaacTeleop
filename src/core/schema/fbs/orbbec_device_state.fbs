@@ -8,6 +8,7 @@ namespace core;
 // Append-only capture-health summary. Consumers can filter incomplete runs
 // without inferring state from a partially written media file.
 enum OrbbecCaptureHealth : byte { Healthy = 0, Warning = 1, Incomplete = 2 }
+enum OrbbecConnectionState : byte { Connected = 0, Recovering = 1, Recovered = 2, Failed = 3 }
 
 struct OrbbecDevicePropertyValue {
   property_id: int32;
@@ -28,6 +29,9 @@ table OrbbecDeviceState {
   queue_capacity: uint32 (id: 10);
   queue_peak: uint32 (id: 11);
   dropped_events: uint64 (id: 12);
+  capture_epoch: uint32 (id: 13);
+  connection_state: OrbbecConnectionState = Connected (id: 14);
+  reconnect_attempt: uint32 (id: 15);
 }
 
 table OrbbecDeviceStateTracked { data: OrbbecDeviceState (id: 0); }

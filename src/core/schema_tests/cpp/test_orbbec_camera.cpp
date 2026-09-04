@@ -23,6 +23,7 @@ static_assert(core::FrameMetadataOrbbec::VT_FPS == VT(4));
 static_assert(core::FrameMetadataOrbbec::VT_PIXEL_FORMAT == VT(5));
 static_assert(core::FrameMetadataOrbbec::VT_ENCODED_BYTES == VT(6));
 static_assert(core::FrameMetadataOrbbec::VT_SDK_METADATA == VT(7));
+static_assert(core::FrameMetadataOrbbec::VT_CAPTURE_EPOCH == VT(8));
 static_assert(core::OrbbecPixelFormat_Mjpg == 0);
 
 TEST_CASE("Orbbec camera metadata round trips", "[orbbec][schema]")
@@ -36,6 +37,7 @@ TEST_CASE("Orbbec camera metadata round trips", "[orbbec][schema]")
     original.pixel_format = core::OrbbecPixelFormat_Mjpg;
     original.encoded_bytes = 1234;
     original.sdk_metadata.emplace_back(1, 99);
+    original.capture_epoch = 3;
 
     flatbuffers::FlatBufferBuilder builder;
     builder.Finish(core::FrameMetadataOrbbec::Pack(builder, &original));
@@ -51,6 +53,7 @@ TEST_CASE("Orbbec camera metadata round trips", "[orbbec][schema]")
     CHECK(restored.encoded_bytes == 1234);
     REQUIRE(restored.sdk_metadata.size() == 1);
     CHECK(restored.sdk_metadata[0].value() == 99);
+    CHECK(restored.capture_epoch == 3);
 }
 
 TEST_CASE("Orbbec Ego auxiliary schemas round trip", "[orbbec][schema]")
@@ -61,12 +64,14 @@ TEST_CASE("Orbbec Ego auxiliary schemas round trip", "[orbbec][schema]")
     imu.sample_rate_hz = 1000;
     imu.full_scale = 500;
     imu.samples.emplace_back(1, 2, 3, 24, 100, 200);
+    imu.capture_epoch = 2;
     flatbuffers::FlatBufferBuilder imu_builder;
     imu_builder.Finish(core::OrbbecImuBatch::Pack(imu_builder, &imu));
     core::OrbbecImuBatchT restored_imu;
     flatbuffers::GetRoot<core::OrbbecImuBatch>(imu_builder.GetBufferPointer())->UnPackTo(&restored_imu);
     REQUIRE(restored_imu.samples.size() == 1);
     CHECK(restored_imu.samples[0].z_si() == 3);
+    CHECK(restored_imu.capture_epoch == 2);
 
     core::OrbbecAudioChunkT audio;
     audio.sample_rate_hz = 48000;
@@ -74,21 +79,25 @@ TEST_CASE("Orbbec Ego auxiliary schemas round trip", "[orbbec][schema]")
     audio.bits_per_sample = 16;
     audio.sample_count = 480;
     audio.wav_data_offset = 44;
+    audio.capture_epoch = 2;
     flatbuffers::FlatBufferBuilder audio_builder;
     audio_builder.Finish(core::OrbbecAudioChunk::Pack(audio_builder, &audio));
     core::OrbbecAudioChunkT restored_audio;
     flatbuffers::GetRoot<core::OrbbecAudioChunk>(audio_builder.GetBufferPointer())->UnPackTo(&restored_audio);
     CHECK(restored_audio.wav_data_offset == 44);
     CHECK(restored_audio.sample_count == 480);
+    CHECK(restored_audio.capture_epoch == 2);
 
     core::OrbbecCalibrationT calibration;
     calibration.device_uid = "ego";
     calibration.raw_alignment_yaml = "camera: left";
+    calibration.capture_epoch = 2;
     flatbuffers::FlatBufferBuilder calibration_builder;
     calibration_builder.Finish(core::OrbbecCalibration::Pack(calibration_builder, &calibration));
     core::OrbbecCalibrationT restored_calibration;
     flatbuffers::GetRoot<core::OrbbecCalibration>(calibration_builder.GetBufferPointer())->UnPackTo(&restored_calibration);
     CHECK(restored_calibration.device_uid == "ego");
+    CHECK(restored_calibration.capture_epoch == 2);
 
     core::OrbbecDeviceStateT state;
     state.sequence_number = 7;
@@ -97,6 +106,9 @@ TEST_CASE("Orbbec Ego auxiliary schemas round trip", "[orbbec][schema]")
     state.failure_reason = "queue warning";
     state.queue_capacity = 4096;
     state.queue_peak = 3482;
+    state.capture_epoch = 2;
+    state.connection_state = core::OrbbecConnectionState_Recovered;
+    state.reconnect_attempt = 4;
     state.properties.emplace_back(279, 8'000'000);
     flatbuffers::FlatBufferBuilder state_builder;
     state_builder.Finish(core::OrbbecDeviceState::Pack(state_builder, &state));
@@ -106,6 +118,9 @@ TEST_CASE("Orbbec Ego auxiliary schemas round trip", "[orbbec][schema]")
     CHECK(restored_state.capture_health == core::OrbbecCaptureHealth_Warning);
     CHECK(restored_state.failure_reason == "queue warning");
     CHECK(restored_state.queue_capacity == 4096);
+    CHECK(restored_state.capture_epoch == 2);
+    CHECK(restored_state.connection_state == core::OrbbecConnectionState_Recovered);
+    CHECK(restored_state.reconnect_attempt == 4);
     REQUIRE(restored_state.properties.size() == 1);
 }
 
@@ -134,12 +149,14 @@ TEST_CASE("Orbbec embedded media schemas round trip", "[orbbec][schema]")
     video.fps = 30;
     video.pixel_format = core::OrbbecPixelFormat_H264;
     video.encoded_data = { 0, 0, 0, 1, 0x65, 1 };
+    video.capture_epoch = 2;
     flatbuffers::FlatBufferBuilder video_builder;
     video_builder.Finish(core::OrbbecEncodedVideoFrame::Pack(video_builder, &video));
     core::OrbbecEncodedVideoFrameT restored_video;
     flatbuffers::GetRoot<core::OrbbecEncodedVideoFrame>(video_builder.GetBufferPointer())->UnPackTo(&restored_video);
     CHECK(restored_video.stream == core::OrbbecCameraStream_ColorRight);
     CHECK(restored_video.encoded_data == video.encoded_data);
+    CHECK(restored_video.capture_epoch == 2);
 
     core::OrbbecPcmAudioChunkT audio;
     audio.sequence_number = 7;
@@ -148,9 +165,11 @@ TEST_CASE("Orbbec embedded media schemas round trip", "[orbbec][schema]")
     audio.bits_per_sample = 16;
     audio.sample_count = 2;
     audio.pcm_data = { 1, 0, 2, 0 };
+    audio.capture_epoch = 2;
     flatbuffers::FlatBufferBuilder audio_builder;
     audio_builder.Finish(core::OrbbecPcmAudioChunk::Pack(audio_builder, &audio));
     core::OrbbecPcmAudioChunkT restored_audio;
     flatbuffers::GetRoot<core::OrbbecPcmAudioChunk>(audio_builder.GetBufferPointer())->UnPackTo(&restored_audio);
     CHECK(restored_audio.pcm_data == audio.pcm_data);
+    CHECK(restored_audio.capture_epoch == 2);
 }

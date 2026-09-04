@@ -168,6 +168,9 @@ pre-commit install --hook-type commit-msg
   Humble's Python 3.10 pytest plugins can otherwise be imported by this
   project's Python 3.11 test environments and produce unrelated dependency
   failures.
+- When a shell script has several subcommand parsers with similar local
+  variables, verify new options in the intended function and cover both default
+  and explicit forwarding in that subcommand's test.
 
 **What belongs in `AGENTS.md`**
 

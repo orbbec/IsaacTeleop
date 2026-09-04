@@ -66,12 +66,16 @@ struct CaptureConfig
     std::string calibration_output;
     std::vector<PropertySetting> properties;
     bool persist_controls = false;
+    uint32_t reconnect_timeout_seconds = 30;
+    uint32_t reconnect_interval_milliseconds = 1000;
 };
 
-// Encoded 60 FPS profiles can be enumerated by an Ego firmware without being
-// bitstream-integrity certified. Keep the policy here (rather than silently
-// selecting a different SDK profile) so CLI and embedded callers agree.
+// Validates device-independent stream fields. Profile availability and
+// simultaneous-stream compatibility are resolved from the selected device.
 void validate_stream_config(const StreamConfig& stream, const CaptureConfig& config);
+// Applies release certification policy to the SDK-resolved profile, including
+// requests where zero selected the SDK default.
+void validate_resolved_stream_config(const StreamConfig& stream, uint32_t resolved_fps);
 
 struct CapturedFrame
 {
@@ -107,6 +111,10 @@ public:
     virtual void close()
     {
     }
+    virtual void abort()
+    {
+        close();
+    }
     virtual std::string error() const
     {
         return {};
@@ -125,8 +133,11 @@ public:
     FrameSink& operator=(const FrameSink&) = delete;
 
     void on_frame(const CapturedFrame& frame);
+    void begin_capture_epoch();
     IMetadataSink* metadata_sink();
+    void close_media();
     void close_metadata();
+    void abort_metadata();
     std::string metadata_error() const;
 
 private:
@@ -145,6 +156,7 @@ struct StreamStats
     uint64_t sequence_gaps = 0;
     uint64_t last_sequence = 0;
     int64_t last_device_timestamp_ns = 0;
+    uint64_t epoch_frame_count = 0;
 };
 
 struct AuxiliaryStats
@@ -155,6 +167,9 @@ struct AuxiliaryStats
     uint64_t publish_queue_peak = 0;
     uint64_t dropped_events = 0;
     uint64_t dropped_video_frame_sets = 0;
+    uint32_t capture_epoch = 0;
+    uint32_t reconnect_attempts = 0;
+    uint32_t successful_reconnects = 0;
 };
 
 class OrbbecCamera

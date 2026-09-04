@@ -7,15 +7,22 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <deviceio_session/replay_session.hpp>
+#include <deviceio_trackers/frame_metadata_tracker_orbbec.hpp>
 #include <deviceio_trackers/hand_tracker.hpp>
 #include <deviceio_trackers/head_tracker.hpp>
 #include <deviceio_trackers/message_channel_tracker.hpp>
+#include <deviceio_trackers/orbbec_ego_trackers.hpp>
 #include <deviceio_trackers/se3_tracker.hpp>
 #include <mcap/recording_traits.hpp>
 #include <mcap/tracker_channels.hpp>
 #include <schema/hand_generated.h>
 #include <schema/head_generated.h>
 #include <schema/message_channel_generated.h>
+#include <schema/orbbec_audio_generated.h>
+#include <schema/orbbec_calibration_generated.h>
+#include <schema/orbbec_camera_generated.h>
+#include <schema/orbbec_device_state_generated.h>
+#include <schema/orbbec_imu_generated.h>
 #include <schema/se3_tracker_generated.h>
 
 #include <array>
@@ -89,6 +96,11 @@ using HandChannels = core::McapTrackerChannels<core::HandPoseRecord, core::HandP
 using MessageChannelChannels =
     core::McapTrackerChannels<core::MessageChannelMessagesRecord, core::MessageChannelMessages>;
 using Se3TrackerChannels = core::McapTrackerChannels<core::Se3TrackerPoseRecord, core::Se3TrackerPose>;
+using OrbbecFrameChannels = core::McapTrackerChannels<core::FrameMetadataOrbbecRecord, core::FrameMetadataOrbbec>;
+using OrbbecImuChannels = core::McapTrackerChannels<core::OrbbecImuBatchRecord, core::OrbbecImuBatch>;
+using OrbbecAudioChannels = core::McapTrackerChannels<core::OrbbecAudioChunkRecord, core::OrbbecAudioChunk>;
+using OrbbecCalibrationChannels = core::McapTrackerChannels<core::OrbbecCalibrationRecord, core::OrbbecCalibration>;
+using OrbbecDeviceStateChannels = core::McapTrackerChannels<core::OrbbecDeviceStateRecord, core::OrbbecDeviceState>;
 
 // ============================================================================
 // Write helpers
@@ -615,6 +627,165 @@ TEST_CASE("ReplaySession: message channel drains payloads alongside sentinels in
 
     session->update();
     CHECK(ctrl_tracker.get_messages(*session).data.empty());
+}
+
+TEST_CASE("ReplaySession: all Orbbec trackers preserve fields across capture epochs", "[replay][session][orbbec]")
+{
+    auto path = get_temp_mcap_path();
+    TempFileCleanup cleanup(path);
+    {
+        auto writer = open_writer(path);
+        OrbbecFrameChannels frames(
+            *writer, "orbbec_metadata", core::OrbbecRecordingTraits::schema_name, { "ColorLeft", "ColorRight" });
+        OrbbecImuChannels imu(*writer, "orbbec_imu", core::OrbbecImuRecordingTraits::schema_name, { "Accel", "Gyro" });
+        OrbbecAudioChannels audio(*writer, "orbbec_audio", core::OrbbecAudioRecordingTraits::schema_name, { "Audio" });
+        OrbbecCalibrationChannels calibration(
+            *writer, "orbbec_calibration", core::OrbbecCalibrationRecordingTraits::schema_name, { "Calibration" });
+        OrbbecDeviceStateChannels state(
+            *writer, "orbbec_device", core::OrbbecDeviceStateRecordingTraits::schema_name, { "DeviceState" });
+
+        for (uint32_t epoch = 0; epoch < 2; ++epoch)
+        {
+            const int64_t timestamp_ns = static_cast<int64_t>(epoch + 1) * 1'000'000;
+            for (size_t stream = 0; stream < 2; ++stream)
+            {
+                auto value = std::make_shared<core::FrameMetadataOrbbecT>();
+                value->stream = stream == 0 ? core::OrbbecCameraStream_ColorLeft : core::OrbbecCameraStream_ColorRight;
+                value->sequence_number = 100 * epoch + stream;
+                value->width = 1600;
+                value->height = 1300;
+                value->fps = 30;
+                value->pixel_format = core::OrbbecPixelFormat_H264;
+                value->encoded_bytes = 4096 + stream;
+                value->sdk_metadata.emplace_back(7, 900 + epoch);
+                value->capture_epoch = epoch;
+                frames.write(stream, core::DeviceDataTimestamp(timestamp_ns, timestamp_ns, timestamp_ns), value);
+            }
+            for (size_t sensor = 0; sensor < 2; ++sensor)
+            {
+                auto value = std::make_shared<core::OrbbecImuBatchT>();
+                value->sensor = sensor == 0 ? core::OrbbecImuSensor_Accel : core::OrbbecImuSensor_Gyro;
+                value->sequence_number = epoch;
+                value->sample_rate_hz = 1000;
+                value->full_scale = sensor == 0 ? 24 : 2000;
+                value->samples.emplace_back(1.0f + sensor, 2.0f, 3.0f, 25.0f, timestamp_ns, timestamp_ns);
+                value->capture_epoch = epoch;
+                imu.write(sensor, core::DeviceDataTimestamp(timestamp_ns, timestamp_ns, timestamp_ns), value);
+            }
+
+            auto audio_value = std::make_shared<core::OrbbecAudioChunkT>();
+            audio_value->sequence_number = epoch;
+            audio_value->sample_rate_hz = 48000;
+            audio_value->channel_count = 1;
+            audio_value->bits_per_sample = 16;
+            audio_value->sample_format = core::OrbbecAudioSampleFormat_S16LE;
+            audio_value->sample_count = 480;
+            audio_value->wav_data_offset = 44 + epoch * 960;
+            audio_value->byte_count = 960;
+            audio_value->capture_epoch = epoch;
+            audio.write(0, core::DeviceDataTimestamp(timestamp_ns, timestamp_ns, timestamp_ns), audio_value);
+
+            auto calibration_value = std::make_shared<core::OrbbecCalibrationT>();
+            calibration_value->device_uid = epoch == 0 ? "1-2-23" : "1-2-24";
+            calibration_value->raw_alignment_yaml = "camera: left";
+            calibration_value->raw_imu_yaml = "imu: calibrated";
+            calibration_value->capture_epoch = epoch;
+            calibration.write(0, core::DeviceDataTimestamp(timestamp_ns, timestamp_ns, timestamp_ns), calibration_value);
+
+            auto state_value = std::make_shared<core::OrbbecDeviceStateT>();
+            state_value->sequence_number = epoch;
+            state_value->device_uid = calibration_value->device_uid;
+            state_value->work_mode = 2;
+            state_value->status_flags = 3;
+            state_value->error_flags = 4;
+            state_value->storage_free_bytes = 5;
+            state_value->temperature_c = 31.5f;
+            state_value->properties.emplace_back(279, 8'000'000);
+            state_value->capture_health = core::OrbbecCaptureHealth_Warning;
+            state_value->failure_reason = epoch == 0 ? "disconnect" : "recovered";
+            state_value->queue_capacity = 4096;
+            state_value->queue_peak = 7;
+            state_value->dropped_events = 0;
+            state_value->capture_epoch = epoch;
+            state_value->connection_state =
+                epoch == 0 ? core::OrbbecConnectionState_Recovering : core::OrbbecConnectionState_Recovered;
+            state_value->reconnect_attempt = 4 + epoch;
+            state.write(0, core::DeviceDataTimestamp(timestamp_ns, timestamp_ns, timestamp_ns), state_value);
+        }
+        writer->close();
+    }
+
+    core::FrameMetadataTrackerOrbbec frame_tracker(
+        "orbbec_metadata", { core::OrbbecCameraStream_ColorLeft, core::OrbbecCameraStream_ColorRight });
+    core::OrbbecImuTracker imu_tracker("orbbec_imu");
+    core::OrbbecAudioTracker audio_tracker("orbbec_audio");
+    core::OrbbecCalibrationTracker calibration_tracker("orbbec_calibration");
+    core::OrbbecDeviceStateTracker state_tracker("orbbec_device");
+    core::McapReplayConfig config;
+    config.filename = path;
+    config.tracker_names = { { &frame_tracker, "orbbec_metadata" },
+                             { &imu_tracker, "orbbec_imu" },
+                             { &audio_tracker, "orbbec_audio" },
+                             { &calibration_tracker, "orbbec_calibration" },
+                             { &state_tracker, "orbbec_device" } };
+    auto session = core::ReplaySession::run(config);
+
+    for (uint32_t epoch = 0; epoch < 2; ++epoch)
+    {
+        session->update();
+        for (size_t stream = 0; stream < 2; ++stream)
+        {
+            const auto& tracked = frame_tracker.get_stream_data(*session, stream);
+            REQUIRE(tracked.data);
+            CHECK(tracked.data->capture_epoch == epoch);
+            CHECK(tracked.data->sequence_number == 100 * epoch + stream);
+            CHECK(tracked.data->width == 1600);
+            CHECK(tracked.data->height == 1300);
+            CHECK(tracked.data->fps == 30);
+            CHECK(tracked.data->pixel_format == core::OrbbecPixelFormat_H264);
+            REQUIRE(tracked.data->sdk_metadata.size() == 1);
+            CHECK(tracked.data->sdk_metadata[0].value() == 900 + epoch);
+        }
+        for (size_t sensor = 0; sensor < 2; ++sensor)
+        {
+            const auto& tracked = imu_tracker.get_stream_data(*session, sensor);
+            REQUIRE(tracked.data);
+            CHECK(tracked.data->capture_epoch == epoch);
+            CHECK(tracked.data->sample_rate_hz == 1000);
+            REQUIRE(tracked.data->samples.size() == 1);
+            CHECK(tracked.data->samples[0].x_si() == 1.0f + sensor);
+        }
+        const auto& audio = audio_tracker.get_data(*session);
+        REQUIRE(audio.data);
+        CHECK(audio.data->capture_epoch == epoch);
+        CHECK(audio.data->sample_rate_hz == 48000);
+        CHECK(audio.data->sample_count == 480);
+        CHECK(audio.data->byte_count == 960);
+
+        const auto& calibration = calibration_tracker.get_data(*session);
+        REQUIRE(calibration.data);
+        CHECK(calibration.data->capture_epoch == epoch);
+        CHECK(calibration.data->device_uid == (epoch == 0 ? "1-2-23" : "1-2-24"));
+        CHECK(calibration.data->raw_alignment_yaml == "camera: left");
+        CHECK(calibration.data->raw_imu_yaml == "imu: calibrated");
+
+        const auto& state = state_tracker.get_data(*session);
+        REQUIRE(state.data);
+        CHECK(state.data->capture_epoch == epoch);
+        CHECK(state.data->reconnect_attempt == 4 + epoch);
+        CHECK(state.data->queue_capacity == 4096);
+        REQUIRE(state.data->properties.size() == 1);
+        CHECK(state.data->properties[0].value() == 8'000'000);
+    }
+
+    session->update();
+    CHECK_FALSE(frame_tracker.get_stream_data(*session, 0).data);
+    CHECK_FALSE(frame_tracker.get_stream_data(*session, 1).data);
+    CHECK_FALSE(imu_tracker.get_stream_data(*session, 0).data);
+    CHECK_FALSE(imu_tracker.get_stream_data(*session, 1).data);
+    CHECK_FALSE(audio_tracker.get_data(*session).data);
+    CHECK_FALSE(calibration_tracker.get_data(*session).data);
+    CHECK_FALSE(state_tracker.get_data(*session).data);
 }
 
 // =============================================================================

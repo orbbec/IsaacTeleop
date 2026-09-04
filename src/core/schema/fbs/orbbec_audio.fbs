@@ -16,6 +16,7 @@ table OrbbecAudioChunk {
   sample_count: uint32 (id: 5);
   wav_data_offset: uint64 (id: 6);
   byte_count: uint32 (id: 7);
+  capture_epoch: uint32 (id: 8);
 }
 
 table OrbbecAudioChunkTracked { data: OrbbecAudioChunk (id: 0); }
@@ -36,6 +37,7 @@ table OrbbecPcmAudioChunk {
   sample_format: OrbbecAudioSampleFormat (id: 4);
   sample_count: uint32 (id: 5);
   pcm_data: [ubyte] (id: 6);
+  capture_epoch: uint32 (id: 7);
 }
 
 table OrbbecPcmAudioChunkRecord {

@@ -65,7 +65,8 @@ inline void bind_orbbec_ego(py::module& m)
         .def_readwrite("sequence_number", &OrbbecImuBatchT::sequence_number)
         .def_readwrite("sample_rate_hz", &OrbbecImuBatchT::sample_rate_hz)
         .def_readwrite("full_scale", &OrbbecImuBatchT::full_scale)
-        .def_readwrite("samples", &OrbbecImuBatchT::samples);
+        .def_readwrite("samples", &OrbbecImuBatchT::samples)
+        .def_readwrite("capture_epoch", &OrbbecImuBatchT::capture_epoch);
     bind_orbbec_tracked<OrbbecImuBatchTrackedT, OrbbecImuBatchT>(m, "OrbbecImuBatchTrackedT");
     bind_orbbec_record<OrbbecImuBatchRecordT, OrbbecImuBatchT>(m, "OrbbecImuBatchRecord");
 
@@ -79,7 +80,8 @@ inline void bind_orbbec_ego(py::module& m)
         .def_readwrite("sample_format", &OrbbecAudioChunkT::sample_format)
         .def_readwrite("sample_count", &OrbbecAudioChunkT::sample_count)
         .def_readwrite("wav_data_offset", &OrbbecAudioChunkT::wav_data_offset)
-        .def_readwrite("byte_count", &OrbbecAudioChunkT::byte_count);
+        .def_readwrite("byte_count", &OrbbecAudioChunkT::byte_count)
+        .def_readwrite("capture_epoch", &OrbbecAudioChunkT::capture_epoch);
     bind_orbbec_tracked<OrbbecAudioChunkTrackedT, OrbbecAudioChunkT>(m, "OrbbecAudioChunkTrackedT");
     bind_orbbec_record<OrbbecAudioChunkRecordT, OrbbecAudioChunkT>(m, "OrbbecAudioChunkRecord");
     py::class_<OrbbecPcmAudioChunkT, std::shared_ptr<OrbbecPcmAudioChunkT>>(m, "OrbbecPcmAudioChunk")
@@ -90,7 +92,8 @@ inline void bind_orbbec_ego(py::module& m)
         .def_readwrite("bits_per_sample", &OrbbecPcmAudioChunkT::bits_per_sample)
         .def_readwrite("sample_format", &OrbbecPcmAudioChunkT::sample_format)
         .def_readwrite("sample_count", &OrbbecPcmAudioChunkT::sample_count)
-        .def_readwrite("pcm_data", &OrbbecPcmAudioChunkT::pcm_data);
+        .def_readwrite("pcm_data", &OrbbecPcmAudioChunkT::pcm_data)
+        .def_readwrite("capture_epoch", &OrbbecPcmAudioChunkT::capture_epoch);
     bind_orbbec_record<OrbbecPcmAudioChunkRecordT, OrbbecPcmAudioChunkT>(m, "OrbbecPcmAudioChunkRecord");
 
     py::class_<OrbbecCameraIntrinsicsT, std::shared_ptr<OrbbecCameraIntrinsicsT>>(m, "OrbbecCameraIntrinsics")
@@ -118,7 +121,8 @@ inline void bind_orbbec_ego(py::module& m)
         .def_readwrite("accel_to_left", &OrbbecCalibrationT::accel_to_left)
         .def_readwrite("gyro_to_left", &OrbbecCalibrationT::gyro_to_left)
         .def_readwrite("raw_alignment_yaml", &OrbbecCalibrationT::raw_alignment_yaml)
-        .def_readwrite("raw_imu_yaml", &OrbbecCalibrationT::raw_imu_yaml);
+        .def_readwrite("raw_imu_yaml", &OrbbecCalibrationT::raw_imu_yaml)
+        .def_readwrite("capture_epoch", &OrbbecCalibrationT::capture_epoch);
     bind_orbbec_tracked<OrbbecCalibrationTrackedT, OrbbecCalibrationT>(m, "OrbbecCalibrationTrackedT");
     bind_orbbec_record<OrbbecCalibrationRecordT, OrbbecCalibrationT>(m, "OrbbecCalibrationRecord");
 
@@ -126,6 +130,11 @@ inline void bind_orbbec_ego(py::module& m)
         .value("Healthy", OrbbecCaptureHealth_Healthy)
         .value("Warning", OrbbecCaptureHealth_Warning)
         .value("Incomplete", OrbbecCaptureHealth_Incomplete);
+    py::enum_<OrbbecConnectionState>(m, "OrbbecConnectionState")
+        .value("Connected", OrbbecConnectionState_Connected)
+        .value("Recovering", OrbbecConnectionState_Recovering)
+        .value("Recovered", OrbbecConnectionState_Recovered)
+        .value("Failed", OrbbecConnectionState_Failed);
     py::class_<OrbbecDevicePropertyValue>(m, "OrbbecDevicePropertyValue")
         .def(py::init<int32_t, double>(), py::arg("property_id") = 0, py::arg("value") = 0.0)
         .def_property(
@@ -145,7 +154,10 @@ inline void bind_orbbec_ego(py::module& m)
         .def_readwrite("failure_reason", &OrbbecDeviceStateT::failure_reason)
         .def_readwrite("queue_capacity", &OrbbecDeviceStateT::queue_capacity)
         .def_readwrite("queue_peak", &OrbbecDeviceStateT::queue_peak)
-        .def_readwrite("dropped_events", &OrbbecDeviceStateT::dropped_events);
+        .def_readwrite("dropped_events", &OrbbecDeviceStateT::dropped_events)
+        .def_readwrite("capture_epoch", &OrbbecDeviceStateT::capture_epoch)
+        .def_readwrite("connection_state", &OrbbecDeviceStateT::connection_state)
+        .def_readwrite("reconnect_attempt", &OrbbecDeviceStateT::reconnect_attempt);
     bind_orbbec_tracked<OrbbecDeviceStateTrackedT, OrbbecDeviceStateT>(m, "OrbbecDeviceStateTrackedT");
     bind_orbbec_record<OrbbecDeviceStateRecordT, OrbbecDeviceStateT>(m, "OrbbecDeviceStateRecord");
 }
