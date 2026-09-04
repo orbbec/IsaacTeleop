@@ -171,6 +171,9 @@ pre-commit install --hook-type commit-msg
 - When a shell script has several subcommand parsers with similar local
   variables, verify new options in the intended function and cover both default
   and explicit forwarding in that subcommand's test.
+- GitHub Actions validates job-level ``env`` before assigning a runner, so do
+  not use ``runner.*`` there; use a fixed path or ``$RUNNER_TEMP`` inside a
+  shell step instead.
 
 **What belongs in `AGENTS.md`**
 

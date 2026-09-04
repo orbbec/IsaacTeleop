@@ -51,7 +51,7 @@ jobs:
     timeout-minutes: 45
     env:
       ORBBEC_SDK_ROOT: ${{ vars.ORBBEC_SDK_ROOT }}
-      UV_CACHE_DIR: ${{ runner.temp }}/isaacteleop-uv-cache
+      UV_CACHE_DIR: /tmp/isaacteleop-uv-cache
 
     steps:
     - uses: actions/checkout@v6

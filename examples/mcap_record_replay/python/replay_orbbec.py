@@ -130,7 +130,10 @@ def main() -> int:
         parser.error("--max-updates must be non-negative")
 
     counts = replay(args.mcap, args.max_updates)
-    print("Replay counts: " + ", ".join(f"{name}={count}" for name, count in counts.items()))
+    print(
+        "Replay counts: "
+        + ", ".join(f"{name}={count}" for name, count in counts.items())
+    )
     if not all(counts.values()):
         missing = ", ".join(name for name, count in counts.items() if count == 0)
         print(f"Replay incomplete; no records for: {missing}")
