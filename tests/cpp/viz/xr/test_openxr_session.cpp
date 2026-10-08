@@ -143,9 +143,16 @@ TEST_CASE("OpenXrSession time conversion throws when extension is unavailable", 
 namespace
 {
 
+struct Stage1Resources
+{
+    // The graphics device must outlive its attached OpenXR session.
+    std::unique_ptr<viz::VkContext> vk;
+    std::unique_ptr<viz::OpenXrSession> sess;
+};
+
 // Build stage-1 OpenXrSession + XR-bound VkContext, or SKIP if either
 // piece isn't available on the host.
-std::pair<std::unique_ptr<viz::OpenXrSession>, std::unique_ptr<viz::VkContext>> make_stage1(const char* app_name)
+Stage1Resources make_stage1(const char* app_name)
 {
     std::unique_ptr<viz::OpenXrSession> sess;
     try
@@ -169,14 +176,14 @@ std::pair<std::unique_ptr<viz::OpenXrSession>, std::unique_ptr<viz::VkContext>> 
     {
         SKIP(std::string("XR-bound VkContext init failed: ") + e.what());
     }
-    return { std::move(sess), std::move(vk) };
+    return { std::move(vk), std::move(sess) };
 }
 
 } // namespace
 
 TEST_CASE("OpenXrSession attach_graphics constructs session + spaces + view config", "[xr][viz_xr]")
 {
-    auto [sess, vk] = make_stage1("viz_xr_test_attach");
+    auto [vk, sess] = make_stage1("viz_xr_test_attach");
     sess->attach_graphics(*vk);
 
     REQUIRE(sess->is_graphics_attached());
@@ -203,7 +210,7 @@ TEST_CASE("OpenXrSession attach_graphics constructs session + spaces + view conf
 // VIEW space + near/far Z plumbing.
 TEST_CASE("OpenXrSession exposes VIEW space and propagates near/far Z config", "[xr][viz_xr]")
 {
-    auto [sess, vk] = make_stage1("viz_xr_test_view_space");
+    auto [vk, sess] = make_stage1("viz_xr_test_view_space");
     viz::OpenXrSession::Config sess_cfg{};
     sess_cfg.near_z = 0.1f;
     sess_cfg.far_z = 250.0f;
@@ -224,7 +231,7 @@ TEST_CASE("OpenXrSession exposes VIEW space and propagates near/far Z config", "
 // Double-attach is a programming error.
 TEST_CASE("OpenXrSession::attach_graphics is single-shot", "[xr][viz_xr]")
 {
-    auto [sess, vk] = make_stage1("viz_xr_test_double_attach");
+    auto [vk, sess] = make_stage1("viz_xr_test_double_attach");
     sess->attach_graphics(*vk);
     CHECK_THROWS_AS(sess->attach_graphics(*vk), std::logic_error);
 }

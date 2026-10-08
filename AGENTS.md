@@ -179,6 +179,9 @@ measurement, a trap someone already paid for. They are not a place to narrate.
   is fine; whole sentences in caps are noise once every third comment has them.
 - **One statement of a fact, in one place.** If a constraint is already in the
   code, the test name, or an adjacent doc, do not restate it.
+- **Follow shared example structure for device additions:** use the existing
+  device table, setup flags, and configuration list, with links to detailed
+  device workflows. Keep common viewer controls in the shared viewer section.
 
 This applies to `#`/`//` comments, docstrings, and comment blocks in
 `CMakeLists.txt`, `pyproject.toml`, YAML data files and scene XML.

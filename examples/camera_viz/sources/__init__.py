@@ -15,6 +15,7 @@ from pipeline import FrameSource
 
 from ._helpers import PairedFrameSource, set_notify_sink, set_verbose
 from .oakd import OakdSource
+from .ego import EgoSource
 from .rtp_h264 import RtpH264Source
 from .synthetic import SyntheticSource, SyntheticStereoSource
 from .v4l2 import V4l2Source
@@ -23,6 +24,7 @@ from .zed import ZedSource
 
 __all__ = [
     "OakdSource",
+    "EgoSource",
     "PairedFrameSource",
     "RtpH264Source",
     "SyntheticSource",
@@ -121,6 +123,20 @@ def build_local_camera(spec: dict) -> List[FrameSource]:
                 )
             return [PairedFrameSource(name=name, left=eyes[0], right=eyes[1])]
         return eyes
+    if kind == "ego":
+        if not stereo:
+            raise ValueError("EGO always produces a stereo frame")
+        return [
+            EgoSource(
+                name=name,
+                device_uid=spec.get("device_uid", ""),
+                width=int(spec.get("width", 1600)),
+                height=int(spec.get("height", 1300)),
+                fps=int(spec.get("fps", 30)),
+                format=spec.get("format", "h264"),
+                gpu_id=int(spec.get("gpu_id", 0)),
+            )
+        ]
     if kind == "video":
         # Stereo (side-by-side file) emits both eyes from one source, like
         # SyntheticStereoSource — viewer-only; camera_streamer's
@@ -158,5 +174,5 @@ def build_local_camera(spec: dict) -> List[FrameSource]:
         return eyes
     raise ValueError(
         f"build_local_camera: unknown camera type {kind!r} "
-        "(known: synthetic, v4l2, oakd, zed, video)"
+        "(known: synthetic, v4l2, oakd, ego, zed, video)"
     )

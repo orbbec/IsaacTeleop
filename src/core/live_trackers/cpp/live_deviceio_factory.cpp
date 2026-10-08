@@ -5,6 +5,8 @@
 
 #include "generated_live_includes.inc"
 #include "live_controller_tracker_impl.hpp"
+#include "live_ego_frame_metadata_tracker_impl.hpp"
+#include "live_ego_imu_tracker_impl.hpp"
 #include "live_full_body_tracker_noitom_impl.hpp"
 #include "live_full_body_tracker_pico_impl.hpp"
 #include "live_full_body_tracker_xsens_impl.hpp"
@@ -15,6 +17,8 @@
 #include "live_tensor_push_tracker_impl.hpp"
 
 #include <deviceio_trackers/controller_tracker.hpp>
+#include <deviceio_trackers/ego_frame_metadata_tracker.hpp>
+#include <deviceio_trackers/ego_imu_tracker.hpp>
 #include <deviceio_trackers/full_body_tracker.hpp>
 #include <deviceio_trackers/hand_tracker.hpp>
 #include <deviceio_trackers/haptic_command_reader_tracker.hpp>
@@ -111,6 +115,19 @@ std::unique_ptr<ITrackerImpl> try_create_haptic_command_reader_impl(LiveDeviceIO
     return typed ? factory.create_haptic_command_reader_tracker_impl(typed) : nullptr;
 }
 
+std::unique_ptr<ITrackerImpl> try_create_ego_frame_metadata_tracker_impl(LiveDeviceIOFactory& factory,
+                                                                         const ITracker& tracker)
+{
+    auto* typed = dynamic_cast<const EgoFrameMetadataTracker*>(&tracker);
+    return typed ? factory.create_ego_frame_metadata_tracker_impl(typed) : nullptr;
+}
+
+std::unique_ptr<ITrackerImpl> try_create_ego_imu_tracker_impl(LiveDeviceIOFactory& factory, const ITracker& tracker)
+{
+    auto* typed = dynamic_cast<const EgoImuTracker*>(&tracker);
+    return typed ? factory.create_ego_imu_tracker_impl(typed) : nullptr;
+}
+
 #include "generated_live_try_create.inc"
 
 using CollectExtensionsFn = bool (*)(const ITracker&, std::set<std::string>&);
@@ -156,6 +173,9 @@ inline const TrackerDispatchEntry k_tracker_dispatch[] = {
     make_dispatch_entry<TensorPushTracker, LiveTensorPushTrackerImpl>(&try_create_tensor_push_impl),
     make_dispatch_entry<HapticCommandReaderTracker, LiveHapticCommandReaderTrackerImpl>(
         &try_create_haptic_command_reader_impl),
+    make_dispatch_entry<EgoFrameMetadataTracker, LiveEgoFrameMetadataTrackerImpl>(
+        &try_create_ego_frame_metadata_tracker_impl),
+    make_dispatch_entry<EgoImuTracker, LiveEgoImuTrackerImpl>(&try_create_ego_imu_tracker_impl),
 // Manifest trackers are single-vendor, so their rows can sit last as a block.
 #include "generated_live_dispatch_rows.inc"
 };
@@ -488,6 +508,27 @@ std::unique_ptr<IHapticCommandReaderTrackerImpl> LiveDeviceIOFactory::create_hap
     const HapticCommandReaderTracker* tracker)
 {
     return std::make_unique<LiveHapticCommandReaderTrackerImpl>(handles_, tracker);
+}
+
+std::unique_ptr<IEgoFrameMetadataTrackerImpl> LiveDeviceIOFactory::create_ego_frame_metadata_tracker_impl(
+    const EgoFrameMetadataTracker* tracker)
+{
+    std::unique_ptr<EgoFrameMetadataMcapChannels> channels;
+    if (should_record(tracker))
+    {
+        channels = LiveEgoFrameMetadataTrackerImpl::create_mcap_channels(*writer_, get_name(tracker), tracker);
+    }
+    return std::make_unique<LiveEgoFrameMetadataTrackerImpl>(handles_, tracker, std::move(channels));
+}
+
+std::unique_ptr<IEgoImuTrackerImpl> LiveDeviceIOFactory::create_ego_imu_tracker_impl(const EgoImuTracker* tracker)
+{
+    std::unique_ptr<EgoImuMcapChannels> channels;
+    if (should_record(tracker))
+    {
+        channels = LiveEgoImuTrackerImpl::create_mcap_channels(*writer_, get_name(tracker), tracker);
+    }
+    return std::make_unique<LiveEgoImuTrackerImpl>(handles_, tracker, std::move(channels));
 }
 
 #include "generated_live_factory_methods.inc"

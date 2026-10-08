@@ -40,6 +40,11 @@ page as Wuji or Manus: what the hardware is, data flow, install, run,
 published collections, and troubleshooting. Keep volatile operator detail
 in the plugin README; do not shrink the site page to a stub.
 
+Describe current plugin behavior without making universal hardware claims.
+Do not present one test device's PID, firmware, or measured link speed as
+compatibility requirements; keep development and acceptance history out of
+public device introductions.
+
 ## Never wrap styled layout in `.. container::`
 
 Docutils renders `container` as `class="docutils container"`, and Bootstrap claims the same

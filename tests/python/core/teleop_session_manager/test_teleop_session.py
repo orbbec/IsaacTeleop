@@ -706,12 +706,19 @@ class MockPluginManager:
     def get_plugin_info(self, plugin_name):
         return SimpleNamespace(name=plugin_name, devices=())
 
-    def start(self, plugin_name, plugin_root_id, plugin_args=None):
+    def start(
+        self,
+        plugin_name,
+        plugin_root_id,
+        plugin_args=None,
+        shutdown_timeout_seconds=2.0,
+    ):
         self.start_calls.append(
             {
                 "plugin_name": plugin_name,
                 "plugin_root_id": plugin_root_id,
                 "plugin_args": plugin_args,
+                "shutdown_timeout_seconds": shutdown_timeout_seconds,
             }
         )
         return self._contexts[plugin_name]
@@ -1514,8 +1521,9 @@ class TestPluginInitialization:
                 assert len(session.plugin_managers) == 0
                 assert len(session.plugin_contexts) == 0
 
-    def test_plugin_args_passed_through(self, tmp_path):
-        """Plugin args from config are forwarded to manager.start()."""
+    @pytest.mark.parametrize("shutdown_timeout_seconds", [2.0, 15.0])
+    def test_plugin_args_passed_through(self, tmp_path, shutdown_timeout_seconds):
+        """Plugin launch and teardown settings reach manager.start()."""
         pipeline = MockPipeline(leaf_nodes=[])
 
         mock_pm = MockPluginManager(plugin_names=["test_plugin"])
@@ -1526,6 +1534,7 @@ class TestPluginInitialization:
             search_paths=[tmp_path],
             enabled=True,
             plugin_args=["--flag", "value"],
+            shutdown_timeout_seconds=shutdown_timeout_seconds,
         )
 
         config = make_config(pipeline, plugins=[plugin_config])
@@ -1537,6 +1546,7 @@ class TestPluginInitialization:
                 assert call["plugin_name"] == "test_plugin"
                 assert call["plugin_root_id"] == "/root"
                 assert call["plugin_args"] == ["--flag", "value"]
+                assert call["shutdown_timeout_seconds"] == shutdown_timeout_seconds
 
     def test_plugin_args_default_empty(self, tmp_path):
         """Plugin args default to an empty list when not specified."""
@@ -2828,6 +2838,17 @@ class TestConfiguration:
 
         assert config.enabled is True
         assert config.required is False
+        assert config.shutdown_timeout_seconds == 2.0
+
+    @pytest.mark.parametrize("timeout", [0.0, -1.0, float("nan"), float("inf")])
+    def test_plugin_config_rejects_invalid_shutdown_timeout(self, tmp_path, timeout):
+        with pytest.raises(ValueError, match="finite and positive"):
+            PluginConfig(
+                plugin_name="test",
+                plugin_root_id="/root",
+                search_paths=[tmp_path],
+                shutdown_timeout_seconds=timeout,
+            )
 
     def test_plugin_config_disabled_and_required(self, tmp_path):
         """PluginConfig accepts explicit lifecycle policy flags."""

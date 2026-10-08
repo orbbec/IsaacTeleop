@@ -12,6 +12,8 @@ add_library(replay_trackers STATIC
     replay_message_channel_tracker_impl.cpp
     replay_tensor_push_tracker_impl.cpp
     replay_haptic_command_reader_tracker_impl.cpp
+    replay_ego_tracker_impl.cpp
+    replay_ego_tracker_impl.hpp
     ${GENERATED_TRACKER_REPLAY_SOURCES}
     inc/replay_trackers/replay_deviceio_factory.hpp
     replay_hand_tracker_impl.hpp

@@ -63,6 +63,12 @@ def _parse_args(argv: Optional[list[str]]):
         "headset to connect. Negative waits forever (the default); 0 fails fast.",
     )
     CloudXRLauncher.add_launcher_arguments(parser)
+    parser.add_argument(
+        "--stereo-debug",
+        choices=("off", "sbs"),
+        default=None,
+        help="Window stereo inspection: off (default) or left/right side by side.",
+    )
     return parser.parse_args(argv)
 
 
@@ -182,6 +188,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     effective_mode = (args.mode or cfg.get("display", {}).get("mode", "xr")).lower()
     config.check_shapes_are_displayable(cfg, effective_mode)
+    stereo_debug = config.resolve_stereo_debug(cfg, args.stereo_debug, effective_mode)
 
     # CloudXR runtime settings (display.cloudxr) go through a generated
     # --cloudxr-env-config file rather than os.environ: an env file is the one
@@ -272,6 +279,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             entries = config.build_local_entries(cfg, is_xr)
         else:
             entries = config.build_rtp_entries(cfg, is_xr)
+        entries = config.apply_stereo_debug(entries, stereo_debug)
 
         # Shape switching needs every shape resident, and the shaped layers
         # are XR-only, so it is off outside XR regardless of the config.

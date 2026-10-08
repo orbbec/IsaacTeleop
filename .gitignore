@@ -4,6 +4,20 @@
 # macOS
 .DS_Store
 
+# Local editor state and runtime logs
+/.vscode/
+/Log/
+
+# Local hardware acceptance evidence
+/src/plugins/ego/ACCEPTANCE.md
+
+# External Orbbec SDK downloads and extracts
+OrbbecSDK*/
+OrbbecSDK*.zip
+OrbbecSDK*.tar.gz
+OrbbecSDK*.tgz
+OrbbecSDK*.7z
+
 # Node.js
 node_modules/
 package-lock.json
@@ -25,6 +39,9 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
 # Python virtual environments
 .venv/
 venv/
@@ -37,6 +54,7 @@ uv.lock
 # Compiled files
 *.o
 *.so
+*.so.*
 *.a
 *.exe
 
