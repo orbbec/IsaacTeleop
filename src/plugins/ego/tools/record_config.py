@@ -19,6 +19,7 @@ scalar_options = {
     "duration": (int, "--duration"),
     "output": (str, "--output"),
     "format": (str, "--format"),
+    "streams": (str, "--streams"),
     "width": (int, "--width"),
     "height": (int, "--height"),
     "fps": (int, "--fps"),

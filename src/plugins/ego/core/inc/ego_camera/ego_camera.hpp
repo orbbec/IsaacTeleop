@@ -87,6 +87,10 @@ struct CaptureConfig
 // Validates device-independent stream fields. Profile availability and
 // simultaneous-stream compatibility are resolved from the selected device.
 void validate_stream_config(const StreamConfig& stream, const CaptureConfig& config);
+// Rejects unsupported/duplicate streams and stereo-only options before outputs or SDK capture start.
+void validate_capture_streams(const std::vector<StreamConfig>& streams, const CaptureConfig& config);
+void validate_available_streams(const std::vector<StreamConfig>& streams,
+                                const std::vector<core::EgoCameraStream>& available);
 // Applies release certification policy to the SDK-resolved profile, including
 // requests where zero selected the SDK default.
 void validate_resolved_stream_config(const StreamConfig& stream, uint32_t resolved_fps);

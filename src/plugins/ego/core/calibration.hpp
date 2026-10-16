@@ -7,12 +7,16 @@
 
 #include <libobsensor/ObSensor.hpp>
 
+#include <map>
 #include <memory>
 #include <string>
 
 namespace plugins::ego
 {
 bool populate_stereo_calibration_from_yaml(const std::string& yaml, core::EgoCalibrationT& calibration);
+void populate_video_calibration(const std::shared_ptr<ob::Device>& device,
+                                const std::map<core::EgoCameraStream, std::shared_ptr<ob::VideoStreamProfile>>& profiles,
+                                core::EgoCalibrationT& calibration);
 std::string raw_data(const std::shared_ptr<ob::Device>& device, OBPropertyID id);
 std::string json_escape(const std::string& input);
 } // namespace plugins::ego

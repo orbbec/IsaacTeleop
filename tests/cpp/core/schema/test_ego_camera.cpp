@@ -32,6 +32,35 @@ static_assert(core::EgoPixelFormat_Mjpg == 0);
 static_assert(core::EgoAudioChunk::VT_TIMING == VT(9));
 static_assert(core::EgoPcmAudioChunk::VT_TIMING == VT(8));
 static_assert(core::EgoCalibration::VT_TIME_ALIGNMENT == VT(11));
+static_assert(core::EgoCalibration::VT_VIDEO_STREAMS == VT(12));
+static_assert(core::EgoCameraStream_ColorLeft == 0);
+static_assert(core::EgoCameraStream_ColorRight == 1);
+static_assert(core::EgoCameraStream_ColorSideLeft == 2);
+static_assert(core::EgoCameraStream_ColorSideRight == 3);
+
+TEST_CASE("EGO optional quad calibration preserves missing values and stream identity", "[unit][ego][schema]")
+{
+    core::EgoCalibrationT calibration;
+    CHECK(core::pack<core::EgoCalibration>(calibration)->video_streams() == nullptr);
+    for (auto stream : { core::EgoCameraStream_ColorLeft, core::EgoCameraStream_ColorRight,
+                         core::EgoCameraStream_ColorSideLeft, core::EgoCameraStream_ColorSideRight })
+    {
+        auto entry = std::make_shared<core::EgoVideoCalibrationT>();
+        entry->stream = stream;
+        entry->intrinsics_source = "unavailable";
+        entry->intrinsics_error = "not supplied by device";
+        calibration.video_streams.push_back(entry);
+    }
+    const auto encoded = core::pack<core::EgoCalibration>(calibration);
+    REQUIRE(encoded->video_streams());
+    REQUIRE(encoded->video_streams()->size() == 4);
+    CHECK(encoded->video_streams()->Get(2)->stream() == core::EgoCameraStream_ColorSideLeft);
+    CHECK(encoded->video_streams()->Get(3)->intrinsics() == nullptr);
+    CHECK(encoded->video_streams()->Get(3)->to_reference() == nullptr);
+    CHECK(encoded->video_streams()->Get(3)->intrinsics_error()->str() == "not supplied by device");
+    CHECK(encoded->color_left() == nullptr);
+    CHECK(encoded->left_to_right() == nullptr);
+}
 
 TEST_CASE("EGO timing tables preserve optional provenance through record serialization", "[unit][ego][schema]")
 {

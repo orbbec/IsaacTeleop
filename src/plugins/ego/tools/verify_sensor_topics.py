@@ -8,6 +8,7 @@ from pathlib import Path
 import struct
 import sys
 from mcap.reader import make_reader
+from stream_inventory import STREAM_IDS, video_streams
 
 
 def unpack_from(fmt, data, offset, label):
@@ -135,9 +136,11 @@ audio = {
 
 policy = None
 expected_policy = None
+manifest_path = Path(path).parent / "requested_profile.json"
 for argument in sys.argv[3:]:
     if argument.startswith("--requested-profile="):
         manifest = Path(argument.split("=", 1)[1])
+        manifest_path = manifest
         if manifest.is_file():
             expected_policy = json.loads(manifest.read_text()).get(
                 "record_device_diagnostics"
@@ -146,6 +149,7 @@ for argument in sys.argv[3:]:
         expected_policy = argument.split("=", 1)[1]
 if expected_policy not in (None, "on", "off"):
     raise SystemExit("Expected diagnostic recording policy must be on or off")
+videos = video_streams(path, manifest_path)
 diagnostic_count = 0
 with open(path, "rb") as stream:
     reader = make_reader(stream)
@@ -197,7 +201,19 @@ with open(path, "rb") as stream:
             diagnostic_count += 1
             diagnostic_record(message.data, topic)
 
-        if topic == "ego_metadata/ColorLeft":
+        if (
+            topic.startswith(("ego_metadata/", "ego_media/"))
+            and topic.rsplit("/", 1)[-1] in STREAM_IDS
+        ):
+            table, timestamp = record_data(message.data, topic)
+            name = topic.rsplit("/", 1)[-1]
+            stream_id = scalar_field(message.data, table, 0, "<b")
+            if stream_id != STREAM_IDS[name]:
+                raise SystemExit(
+                    f"{topic} contains mismatched video stream id {stream_id}"
+                )
+
+        if topic == f"ego_metadata/{videos[0]}":
             table, timestamp = record_data(message.data, topic)
             capture_epoch = scalar_field(message.data, table, 8, "<I")
             epoch = video_epochs.setdefault(
@@ -357,14 +373,13 @@ expect_imu = expect_imu or any(counts[topic] for topic in imu)
 expect_audio = expect_audio or any(counts[topic] for topic in audio)
 
 required = [
-    "ego_metadata/ColorLeft",
-    "ego_metadata/ColorRight",
+    *(f"ego_metadata/{name}" for name in videos),
     "ego_calibration/Calibration",
 ]
 if policy == "on" and diagnostic_count == 0:
     raise SystemExit("Diagnostics enabled but no EgoDeviceState records exist")
 if mode == "embedded":
-    required += ["ego_media/ColorLeft", "ego_media/ColorRight"]
+    required += [f"ego_media/{name}" for name in videos]
 if expect_imu:
     required += ["ego_imu/Accel", "ego_imu/Gyro"]
 if expect_audio:

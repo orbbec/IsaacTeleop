@@ -5,8 +5,8 @@ include "timestamp.fbs";
 
 namespace core;
 
-// The two RGB sensors exposed by the EGO camera.
-enum EgoCameraStream : byte { ColorLeft = 0, ColorRight = 1 }
+// Append-only: stereo recordings retain their original stream identities.
+enum EgoCameraStream : byte { ColorLeft = 0, ColorRight = 1, ColorSideLeft = 2, ColorSideRight = 3 }
 
 // Values are append-only: existing recordings use Mjpg == 0.
 enum EgoPixelFormat : byte { Mjpg = 0, H264 = 1, H265 = 2 }

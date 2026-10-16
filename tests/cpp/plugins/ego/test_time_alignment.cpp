@@ -94,6 +94,29 @@ TEST_CASE("EGO missing timing model preserves callback times and unverified prov
     CHECK_FALSE(alignment.has_update());
 }
 
+TEST_CASE("EGOPRO timing preserves all active profiles without applying a stereo model", "[ego][timing]")
+{
+    auto selected = identity();
+    selected.imu_rate_hz = 0;
+    selected.audio_rate_hz = 0;
+    for (const auto* stream : { "left_rgb", "right_rgb", "side_left_rgb", "side_right_rgb" })
+        selected.videos[stream] = { "h264", 1600, 1200, 30 };
+    plugins::ego::TimeAlignment alignment;
+    alignment.configure(selected);
+    alignment.begin_epoch(2);
+    CHECK(alignment.sample_time("side_right_rgb", 100, 500) == 500);
+    const auto json = alignment.snapshot();
+    CHECK(json.find("\"version\":2") != std::string::npos);
+    CHECK(json.find("\"videos\":{") != std::string::npos);
+    CHECK(json.find("\"side_left_rgb\":\"sdk_uvc_raw\"") != std::string::npos);
+    CHECK(json.find("\"side_right_rgb\":\"sdk_uvc_raw\"") != std::string::npos);
+    CHECK(json.find("\"accel\":\"sdk_imu_raw\"") == std::string::npos);
+    CHECK(json.find("\"status\":\"unverified\"") != std::string::npos);
+    ProfileFile file;
+    plugins::ego::TimeAlignment loaded(file.path.string());
+    CHECK_THROWS_AS(loaded.configure(selected), std::invalid_argument);
+}
+
 TEST_CASE("EGO relative profile uses one estimated host anchor and resets it on recovery", "[ego][timing]")
 {
     ProfileFile file;

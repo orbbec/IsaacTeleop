@@ -138,6 +138,8 @@ def build_local_camera(
                 format=spec.get("format", "h264"),
                 gpu_id=int(spec.get("gpu_id", 0)),
                 renderer_cuda_device_id=renderer_cuda_device_id,
+                left_stream=spec.get("left_stream", "ColorLeft"),
+                right_stream=spec.get("right_stream", "ColorRight"),
             )
         ]
     if kind == "video":

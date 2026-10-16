@@ -6,11 +6,20 @@ import json
 from pathlib import Path
 import sys
 
+from stream_inventory import requested_streams
+
 manifest_path = Path(sys.argv[1])
-actual_signatures = {
-    "ColorLeft": sys.argv[2],
-    "ColorRight": sys.argv[3],
-}
+arguments = sys.argv[2:]
+if len(arguments) == 2 and all("=" not in value for value in arguments):
+    actual_signatures = dict(zip(("ColorLeft", "ColorRight"), arguments))
+else:
+    pairs = [value.split("=", 1) for value in arguments]
+    if any(len(pair) != 2 for pair in pairs) or len({pair[0] for pair in pairs}) != len(
+        pairs
+    ):
+        raise SystemExit("Expected unique STREAM=ffprobe-signature arguments")
+    actual_signatures = dict(pairs)
+requested_streams(manifest_path)
 try:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 except (OSError, json.JSONDecodeError) as error:
@@ -72,6 +81,6 @@ for stream_name, signature in actual_signatures.items():
     # Elementary-stream VUI clocks may use multiple ticks per frame. MCAP's
     # declared profile and raw device timestamps determine capture FPS.
 print(
-    "Requested codec/resolution match ColorLeft and ColorRight: OK; "
+    f"Requested codec/resolution match {', '.join(actual_signatures)}: OK; "
     "capture FPS is checked from MCAP metadata and device timestamps"
 )

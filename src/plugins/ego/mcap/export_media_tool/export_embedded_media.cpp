@@ -8,11 +8,11 @@
 #include <schema/ego_camera_bfbs_generated.h>
 #include <schema/ego_camera_generated.h>
 
-#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -83,31 +83,45 @@ void export_media(const std::filesystem::path& input_path, const std::filesystem
     if (!summary.ok() || !video_reader->footer())
         throw std::runtime_error("embedded MCAP has no valid completed summary/footer");
     const core::RecordedSchemas recorded(*video_reader);
+    std::map<core::EgoCameraStream, std::string> video_streams;
+    bool has_audio = false;
+    for (const auto& [_, channel] : video_reader->channels())
+    {
+        if (channel->topic == "ego_media/Audio")
+            has_audio = true;
+        else if (channel->topic.rfind("ego_media/", 0) == 0)
+        {
+            const auto name = channel->topic.substr(std::string("ego_media/").size());
+            bool known = false;
+            for (const auto stream : core::EnumValuesEgoCameraStream())
+                if (name == core::EnumNameEgoCameraStream(stream))
+                {
+                    video_streams.emplace(stream, name);
+                    known = true;
+                    break;
+                }
+            if (!known)
+                throw std::runtime_error("unknown Ego embedded video channel: " + channel->topic);
+        }
+    }
     video_reader.reset();
     using VideoViewer = core::McapTrackerViewers<core::EgoEncodedVideoFrameRecord>;
-    // A reader per eye prevents one eye's drain from buffering the entire other eye.
-    std::array<std::unique_ptr<VideoViewer>, 2> video;
-    for (size_t index = 0; index < video.size(); ++index)
-        video[index] = std::make_unique<VideoViewer>(
-            open_reader(input_path), "ego_media",
-            std::vector<std::string>{ core::EnumNameEgoCameraStream(static_cast<core::EgoCameraStream>(index)) },
-            recorded);
-    core::McapTrackerViewers<core::EgoPcmAudioChunkRecord> audio(
-        open_reader(input_path), "ego_media", { "Audio" }, recorded);
 
     std::filesystem::create_directories(output_dir);
     size_t video_count = 0;
-    for (size_t index = 0; index < 2; ++index)
+    for (const auto& [stream, name] : video_streams)
     {
+        // A reader per stream avoids buffering every other stream during this drain.
+        VideoViewer video(open_reader(input_path), "ego_media", { name }, recorded);
         std::ofstream output;
         std::filesystem::path path;
         core::EgoPixelFormat format{};
-        while (const auto record = video[index]->read(0))
+        while (const auto record = video.read(0))
         {
             const auto* data = record->data();
             if (!data || !data->encoded_data())
                 continue;
-            if (static_cast<size_t>(data->stream()) != index)
+            if (data->stream() != stream)
                 throw std::runtime_error("embedded video stream does not match its MCAP topic");
             if (!output.is_open())
             {
@@ -131,8 +145,7 @@ void export_media(const std::filesystem::path& input_path, const std::filesystem
             if (!output)
                 throw std::runtime_error("failed while finalizing embedded video output");
             ++video_count;
-            std::cout << core::EnumNameEgoCameraStream(static_cast<core::EgoCameraStream>(index)) << ": " << path
-                      << std::endl;
+            std::cout << name << ": " << path << std::endl;
         }
     }
 
@@ -142,8 +155,15 @@ void export_media(const std::filesystem::path& input_path, const std::filesystem
     uint32_t audio_rate = 0;
     uint16_t audio_channels = 0;
     uint16_t audio_bits = 0;
-    while (const auto record = audio.read(0))
+    std::unique_ptr<core::McapTrackerViewers<core::EgoPcmAudioChunkRecord>> audio;
+    if (has_audio)
+        audio = std::make_unique<core::McapTrackerViewers<core::EgoPcmAudioChunkRecord>>(
+            open_reader(input_path), "ego_media", std::vector<std::string>{ "Audio" }, recorded);
+    while (audio)
     {
+        const auto record = audio->read(0);
+        if (!record)
+            break;
         const auto* data = record->data();
         if (!data || !data->pcm_data())
             continue;

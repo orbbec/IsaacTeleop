@@ -3,12 +3,14 @@
 
 #include "diagnostics.hpp"
 #include "inc/ego_camera/ego_camera.hpp"
+#include "inc/ego_camera/streams.hpp"
 
 #include <algorithm>
 #include <array>
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <set>
 #include <stdexcept>
 #include <string_view>
 #include <utility>
@@ -19,6 +21,7 @@ namespace plugins::ego
 void validate_stream_config(const StreamConfig& stream, const CaptureConfig& config)
 {
     static_cast<void>(config);
+    static_cast<void>(camera_stream_descriptor(stream.camera));
     switch (stream.pixel_format)
     {
     case core::EgoPixelFormat_Mjpg:
@@ -28,6 +31,43 @@ void validate_stream_config(const StreamConfig& stream, const CaptureConfig& con
     default:
         throw std::invalid_argument("Unsupported Ego pixel format");
     }
+}
+
+void validate_capture_streams(const std::vector<StreamConfig>& streams, const CaptureConfig& config)
+{
+    // Auxiliary-only FrameSinks are valid; the capture owner enforces nonempty video selection.
+    std::set<core::EgoCameraStream> selected;
+    bool has_side = false;
+    for (const auto& stream : streams)
+    {
+        validate_stream_config(stream, config);
+        const auto& descriptor = camera_stream_descriptor(stream.camera);
+        if (!selected.insert(stream.camera).second)
+            throw std::invalid_argument(std::string("Duplicate Ego camera stream: ") + descriptor.name);
+        has_side = has_side || descriptor.side;
+    }
+    if (has_side && config.preview)
+        throw std::invalid_argument("SDL preview supports only ColorLeft/ColorRight; disable --preview for side streams");
+    if (has_side && !config.time_alignment.empty())
+        throw std::invalid_argument("Side camera streams cannot use a version-1 stereo --time-alignment profile");
+}
+
+void validate_available_streams(const std::vector<StreamConfig>& streams,
+                                const std::vector<core::EgoCameraStream>& available)
+{
+    std::string missing;
+    for (const auto& stream : streams)
+    {
+        const auto& descriptor = camera_stream_descriptor(stream.camera);
+        if (std::find(available.begin(), available.end(), stream.camera) == available.end())
+        {
+            if (!missing.empty())
+                missing += ", ";
+            missing += descriptor.name;
+        }
+    }
+    if (!missing.empty())
+        throw std::invalid_argument("Requested Ego camera sensors unavailable: " + missing);
 }
 
 void validate_resolved_stream_config(const StreamConfig& stream, uint32_t resolved_fps)
@@ -48,6 +88,7 @@ public:
     Impl(const std::vector<StreamConfig>& streams, std::unique_ptr<IMetadataSink> metadata_sink, bool write_media_sidecars)
         : metadata_sink_(std::move(metadata_sink))
     {
+        validate_capture_streams(streams, {});
         for (const auto& stream : streams)
         {
             std::unique_ptr<std::ofstream> file;
@@ -176,6 +217,25 @@ private:
                                          size_t payload_end,
                                          core::EgoPixelFormat format)
         {
+            // EGOPRO FW 1.1.1 H264 uses this complete 45-byte user payload without a frame ID.
+            // Match its envelope too; arbitrary user SEI containing a vendor tag must survive.
+            if (format == core::EgoPixelFormat_H264 && payload_end - payload_begin == 48 &&
+                bytes[payload_begin] == 0x05 && bytes[payload_begin + 1] == 45 && bytes[payload_end - 1] == 0x80)
+            {
+                const std::string_view payload(reinterpret_cast<const char*>(bytes.data() + payload_begin + 2), 45);
+                constexpr std::string_view prefix = "EGO-4B000000_";
+                constexpr std::string_view timestamp = ",timestamp_us=";
+                const auto tag = payload.substr(prefix.size(), 2);
+                const auto digits_offset = prefix.size() + 2 + timestamp.size();
+                if (payload.starts_with(prefix) && (tag == "RS" || tag == "0L" || tag == "LS" || tag == "0R") &&
+                    payload.substr(prefix.size() + 2, timestamp.size()) == timestamp &&
+                    payload.size() - digits_offset == 16 &&
+                    std::all_of(payload.begin() + static_cast<std::ptrdiff_t>(digits_offset), payload.end(),
+                                [](char value) { return value >= '0' && value <= '9'; }))
+                {
+                    return true;
+                }
+            }
             const auto begin = bytes.begin() + static_cast<std::ptrdiff_t>(payload_begin);
             const auto end = bytes.begin() + static_cast<std::ptrdiff_t>(payload_end);
             static constexpr std::array<uint8_t, 11> kLegacyMarker = { 'O', 'R', 'B', 'B', 'E', 'C',

@@ -18,6 +18,7 @@ from isaaccapture.ego.sync import (
     analyze_recording_sync,
     iter_sync_windows,
     recording_fingerprint,
+    VIDEO_STREAMS,
 )
 
 ORIGIN = 1_700_000_000_000_000_001
@@ -120,12 +121,19 @@ def recording(tmp_path):
         local_transition=False,
         pcm_timing_mismatch=False,
         imu_samples=40,
+        quad=False,
+        side_left_frame_ids=None,
     ):
         root = tmp_path / f"capture_{serial}"
         root.mkdir()
         path = root / "metadata.mcap"
         schemas, channels = {}, {}
-        video_bytes = {"ColorLeft": bytearray(), "ColorRight": bytearray()}
+        video_names = (
+            ("ColorLeft", "ColorRight", "ColorSideLeft", "ColorSideRight")
+            if quad
+            else ("ColorLeft", "ColorRight")
+        )
+        video_bytes = {name: bytearray() for name in video_names}
         wav = bytearray(44)
         with path.open("wb") as output:
             writer = Writer(output, compression=CompressionType.NONE)
@@ -273,11 +281,14 @@ def recording(tmp_path):
                         calibration_data,
                         ORIGIN,
                     )
-                for side, discriminator in (
-                    ("ColorLeft", "ColorLeft"),
-                    ("ColorRight", "ColorRight"),
-                ):
-                    for frame_id in frame_ids:
+                for side in video_names:
+                    discriminator = side
+                    ids = (
+                        side_left_frame_ids
+                        if side == "ColorSideLeft" and side_left_frame_ids is not None
+                        else frame_ids
+                    )
+                    for frame_id in ids:
                         raw = (
                             ORIGIN
                             + frame_id * PERIOD
@@ -395,7 +406,7 @@ def recording(tmp_path):
             if audio:
                 (root / "Audio.wav").write_bytes(wav)
         model = {
-            "version": 1,
+            "version": 2 if quad else 1,
             "scope": "recording",
             "status": "validated",
             "reference_stream": "left_rgb",
@@ -412,6 +423,12 @@ def recording(tmp_path):
             },
             "epochs": [],
         }
+        if quad:
+            model["profile"] = {
+                **PROFILE,
+                "videos": {stream: PROFILE["video"].copy() for stream in VIDEO_STREAMS},
+            }
+            del model["profile"]["video"]
         for epoch in epochs:
             maps = {
                 stream: {
@@ -422,7 +439,7 @@ def recording(tmp_path):
                     "validation_start_ns": ORIGIN,
                     "validation_end_ns": ORIGIN + 1_800_000_000_000,
                 }
-                for stream in ALL
+                for stream in ((*VIDEO_STREAMS, "accel", "gyro") if quad else ALL)
                 if stream != "audio"
             }
             maps["audio"] = {
@@ -1046,3 +1063,110 @@ def test_truncated_flatbuffer_is_rejected(recording):
     decoder = RecordDecoder(schema.data, schema.name)
     with pytest.raises(ValueError, match="Truncated or invalid FlatBuffer"):
         decoder.decode(message.data[:15])
+
+
+@pytest.mark.parametrize("embedded", [False, True])
+def test_four_video_streams_keep_distinct_media_and_legacy_views(recording, embedded):
+    path, model = recording(quad=True, embedded=embedded, audio=False)
+    windows = list(
+        iter_sync_windows(path, required_streams=VIDEO_STREAMS, alignment=model)
+    )
+    assert len(windows) == 3
+    assert all(window.complete for window in windows)
+    for window in windows:
+        assert tuple(window.videos) == VIDEO_STREAMS
+        assert window.left_rgb is window.videos["left_rgb"]
+        assert window.right_rgb is window.videos["right_rgb"]
+        assert all(frame.stream == stream for stream, frame in window.videos.items())
+        assert all(
+            frame.media.storage == ("mcap" if embedded else "sidecar")
+            for frame in window.videos.values()
+        )
+        with pytest.raises(TypeError):
+            window.videos["side_left_rgb"] = None
+    report = analyze_recording_sync(
+        path, required_streams=VIDEO_STREAMS, alignment=model
+    )
+    assert report["selected_streams_verified"]
+    assert not report["five_stream_verified"]
+    assert all(report["streams"][stream]["records"] == 4 for stream in VIDEO_STREAMS)
+    assert all(
+        report["coverage"]["streams"][stream]["assigned_samples"] == 3
+        for stream in VIDEO_STREAMS
+    )
+    assert all(
+        len(report["coverage"]["unpaired_video"][stream]) == 1
+        for stream in VIDEO_STREAMS
+    )
+    assert set(report["windows"][0]["videos"]) == set(VIDEO_STREAMS)
+    json.dumps(report, allow_nan=False)
+
+
+def test_missing_side_frame_is_explicit_and_never_reused(recording):
+    path, model = recording(quad=True, side_left_frame_ids=(0, 2, 3))
+    windows = list(
+        iter_sync_windows(path, required_streams=VIDEO_STREAMS, alignment=model)
+    )
+    assert [window.complete for window in windows] == [True, False, True]
+    assert windows[1].reasons == ("missing_side_left_rgb",)
+    assert windows[1].videos["side_left_rgb"] is None
+    assert (
+        windows[0].videos["side_left_rgb"].record.record_index
+        != windows[2].videos["side_left_rgb"].record.record_index
+    )
+
+
+def test_quad_allows_side_camera_window_reference(recording):
+    path, model = recording(quad=True)
+    windows = list(
+        iter_sync_windows(
+            path,
+            required_streams=VIDEO_STREAMS,
+            reference_stream="side_right_rgb",
+            alignment=model,
+        )
+    )
+    assert len(windows) == 3
+    assert all(
+        window.complete and window.reference_stream == "side_right_rgb"
+        for window in windows
+    )
+
+
+@pytest.mark.parametrize("reference", VIDEO_STREAMS[2:])
+def test_side_reference_requires_an_explicit_selected_stream_set(reference):
+    with pytest.raises(ValueError, match="include reference_stream"):
+        analyze_recording_sync("unused.mcap", reference_stream=reference)
+
+
+def test_quad_raw_audit_retains_all_streams_without_validated_timing(recording):
+    path, _ = recording(quad=True)
+    report = analyze_recording_sync(path, required_streams=VIDEO_STREAMS)
+    assert report["alignment"]["status"] == "unverified"
+    assert not report["selected_streams_verified"]
+    assert report["windows"] == []
+    assert all(report["streams"][stream]["records"] == 4 for stream in VIDEO_STREAMS)
+
+
+def test_stereo_time_model_cannot_certify_a_quad_recording(recording):
+    path, model = recording(quad=True)
+    model["version"] = 1
+    model["profile"] = PROFILE.copy()
+    with pytest.raises(ValueError, match="Stereo v1 alignment"):
+        list(
+            iter_sync_windows(
+                path, required_streams=("left_rgb", "right_rgb"), alignment=model
+            )
+        )
+    report = analyze_recording_sync(
+        path, required_streams=VIDEO_STREAMS, alignment=model
+    )
+    assert report["alignment"]["status"] == "invalid"
+    assert all(report["streams"][stream]["records"] == 4 for stream in VIDEO_STREAMS)
+
+
+def test_quad_model_requires_independent_per_camera_profile(recording):
+    path, model = recording(quad=True)
+    model["profile"]["videos"]["side_left_rgb"]["width"] += 1
+    with pytest.raises(ValueError, match="profile mismatch on side_left_rgb"):
+        list(iter_sync_windows(path, required_streams=VIDEO_STREAMS, alignment=model))

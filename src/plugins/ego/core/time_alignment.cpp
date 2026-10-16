@@ -229,7 +229,7 @@ void TimeAlignment::configure(const TimingIdentity& value)
                          { "firmware", value.firmware },
                          { "sdk_version", value.sdk_version },
                          { "sdk_binary_sha256", value.sdk_binary_sha256 } };
-    const Json profile{
+    Json profile{
         { "video",
           { { "format", value.video_format }, { "width", value.width }, { "height", value.height }, { "fps", value.fps } } },
         { "imu_rate_hz", value.imu_rate_hz },
@@ -238,6 +238,19 @@ void TimeAlignment::configure(const TimingIdentity& value)
             { "channels", value.audio_channels },
             { "bits_per_sample", value.audio_bits } } }
     };
+    const bool quad =
+        value.side_capable_device || value.videos.count("side_left_rgb") || value.videos.count("side_right_rgb");
+    if (quad)
+    {
+        if (!impl_->profile.is_null())
+            throw std::invalid_argument("Version-1 EGO capture timing profiles cannot be applied to EGOPRO streams");
+        profile.erase("video");
+        profile["videos"] = Json::object();
+        for (const auto& [name, video] : value.videos)
+            profile["videos"][name] = {
+                { "format", video.format }, { "width", video.width }, { "height", video.height }, { "fps", video.fps }
+            };
+    }
     if (!impl_->profile.is_null())
     {
         const auto& mappings = impl_->profile.at("streams");
@@ -273,6 +286,22 @@ void TimeAlignment::configure(const TimingIdentity& value)
                           { "sample_time_policy", "host_arrival_fallback" } };
     if (!impl_->profile.is_null())
         impl_->provenance["capture_profile"] = impl_->profile;
+    if (quad)
+    {
+        impl_->provenance["version"] = 2;
+        impl_->provenance["reference_stream"] = value.videos.count("left_rgb") ? "left_rgb" : value.videos.begin()->first;
+        auto& sources = impl_->provenance["sources"];
+        sources = Json::object();
+        for (const auto& [name, _] : value.videos)
+            sources[name] = "sdk_uvc_raw";
+        if (value.imu_rate_hz)
+        {
+            sources["accel"] = "sdk_imu_raw";
+            sources["gyro"] = "sdk_imu_raw";
+        }
+        if (value.audio_rate_hz)
+            sources["audio"] = "sdk_audio_raw";
+    }
     impl_->updated = true;
 }
 

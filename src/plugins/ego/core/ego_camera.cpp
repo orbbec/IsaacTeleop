@@ -11,6 +11,7 @@
 #include "diagnostics.hpp"
 #include "inc/ego_camera/cancellation.hpp"
 #include "inc/ego_camera/ego_camera.hpp"
+#include "inc/ego_camera/streams.hpp"
 #include "inc/ego_camera/time_alignment.hpp"
 #include "wav_writer.hpp"
 
@@ -196,6 +197,10 @@ OBFrameType to_ob_frame(core::EgoCameraStream stream)
         return OB_FRAME_COLOR_LEFT;
     case core::EgoCameraStream_ColorRight:
         return OB_FRAME_COLOR_RIGHT;
+    case core::EgoCameraStream_ColorSideLeft:
+        return OB_FRAME_COLOR_SIDE_LEFT;
+    case core::EgoCameraStream_ColorSideRight:
+        return OB_FRAME_COLOR_SIDE_RIGHT;
     default:
         throw std::invalid_argument("Unsupported Ego camera stream");
     }
@@ -209,6 +214,10 @@ OBSensorType to_ob_sensor(core::EgoCameraStream stream)
         return OB_SENSOR_COLOR_LEFT;
     case core::EgoCameraStream_ColorRight:
         return OB_SENSOR_COLOR_RIGHT;
+    case core::EgoCameraStream_ColorSideLeft:
+        return OB_SENSOR_COLOR_SIDE_LEFT;
+    case core::EgoCameraStream_ColorSideRight:
+        return OB_SENSOR_COLOR_SIDE_RIGHT;
     default:
         throw std::invalid_argument("Unsupported Ego camera stream");
     }
@@ -223,6 +232,15 @@ bool has_sensor(const std::shared_ptr<ob::Device>& device, OBSensorType sensor)
             return true;
     }
     return false;
+}
+
+std::vector<core::EgoCameraStream> available_camera_streams(const std::shared_ptr<ob::Device>& device)
+{
+    std::vector<core::EgoCameraStream> available;
+    for (const auto& descriptor : kCameraStreams)
+        if (has_sensor(device, to_ob_sensor(descriptor.stream)))
+            available.push_back(descriptor.stream);
+    return available;
 }
 
 void print_profiles(const std::shared_ptr<ob::Device>& device, core::EgoCameraStream stream)
@@ -282,9 +300,14 @@ std::shared_ptr<ob::Config> make_video_config(const ActiveProfiles& profiles, co
                                                       return stream.pixel_format == core::EgoPixelFormat_H264 ||
                                                              stream.pixel_format == core::EgoPixelFormat_H265;
                                                   });
+    const bool has_side =
+        std::any_of(streams.begin(), streams.end(),
+                    [](const StreamConfig& stream) { return camera_stream_descriptor(stream.camera).side; });
     // Single-eye capture must not wait for an unrequested color frame.
     // MJPG capture must retain an available eye even when its stereo partner is absent.
-    config->setFrameAggregateOutputMode(profiles.size() == 1 ? OB_FRAME_AGGREGATE_OUTPUT_ANY_SITUATION :
+    // The SDK's stereo COLOR_FRAME_REQUIRE contract does not establish a four-RGB barrier.
+    // Retain partial side-stream framesets; readiness and liveness cover every requested stream.
+    config->setFrameAggregateOutputMode(profiles.size() == 1 || has_side ? OB_FRAME_AGGREGATE_OUTPUT_ANY_SITUATION :
                                         has_interframe_video ? OB_FRAME_AGGREGATE_OUTPUT_COLOR_FRAME_REQUIRE :
                                                                OB_FRAME_AGGREGATE_OUTPUT_ANY_SITUATION);
     return config;
@@ -317,6 +340,9 @@ public:
           streams_(streams),
           sink_(std::move(sink))
     {
+        validate_capture_streams(streams_, config_);
+        if (streams_.empty())
+            throw std::invalid_argument("At least one Ego camera stream is required");
 #if !defined(EGO_ENABLE_PREVIEW)
         if (config_.preview)
         {
@@ -336,26 +362,36 @@ public:
             throw std::runtime_error("No Ego devices found. Check USB connection and udev permissions.");
         }
 
+        std::string unavailable_sensors;
         for (uint32_t index = 0; index < devices->getCount(); ++index)
         {
             check_cancelled();
             const auto candidate = devices->getDevice(index);
             if (!config.device_uid.empty() && candidate->getDeviceInfo()->getUid() != config.device_uid)
                 continue;
-            bool supports_requested_streams = true;
-            for (const auto& stream : streams_)
-                supports_requested_streams =
-                    supports_requested_streams && has_sensor(candidate, to_ob_sensor(stream.camera));
-            if (supports_requested_streams)
+            const auto available = available_camera_streams(candidate);
+            try
             {
-                // Adopt the EGO callback owner before pipelines; newer SDK
-                // wrappers transfer the base device handle.
-                device_ = adopt_ego_device(candidate);
-                break;
+                validate_available_streams(streams_, available);
             }
+            catch (const std::invalid_argument& error)
+            {
+                if (!unavailable_sensors.empty())
+                    unavailable_sensors += "; ";
+                unavailable_sensors += std::string(candidate->getDeviceInfo()->getUid()) + ": " + error.what();
+                continue;
+            }
+            selected_device_has_side_sensors_ =
+                std::any_of(available.begin(), available.end(),
+                            [](core::EgoCameraStream stream) { return camera_stream_descriptor(stream).side; });
+            // Adopt the EGO callback owner before pipelines; newer SDK
+            // wrappers transfer the base device handle.
+            device_ = adopt_ego_device(candidate);
+            break;
         }
         if (!device_)
-            throw std::runtime_error("No Ego device matches the requested UID and ColorLeft/ColorRight sensors.");
+            throw std::runtime_error("No Ego device matches the requested UID and camera streams" +
+                                     (unavailable_sensors.empty() ? std::string(".") : ": " + unavailable_sensors));
         const auto selected_info = device_->getDeviceInfo();
         selected_device_uid_ = selected_info->getUid();
         selected_device_serial_ = selected_info->getSerialNumber();
@@ -1784,8 +1820,8 @@ public:
             captured.encoded_data.assign(frame->getData(), frame->getData() + frame->getDataSize());
             captured.sample_time_raw_device_clock_ns = sdk_timestamp_ns(frame->getTimeStampUs());
             captured.sample_time_local_common_clock_ns = time_alignment_.sample_time(
-                stream.camera == core::EgoCameraStream_ColorLeft ? "left_rgb" : "right_rgb",
-                captured.sample_time_raw_device_clock_ns, arrival_time_local_common_clock_ns);
+                camera_stream_descriptor(stream.camera).timing_name, captured.sample_time_raw_device_clock_ns,
+                arrival_time_local_common_clock_ns);
             auto& stats = stats_[stream.camera];
             if (stats.epoch_frame_count > 0 && captured.metadata.sequence_number <= stats.last_sequence)
             {
@@ -2239,6 +2275,8 @@ public:
         const auto first = active_profiles_.begin()->second;
         if (!config_.time_alignment.empty())
         {
+            if (selected_device_has_side_sensors_)
+                throw std::invalid_argument("EGOPRO cannot use a version-1 stereo --time-alignment profile");
             if (!active_profiles_.count(core::EgoCameraStream_ColorLeft))
                 throw std::invalid_argument("EGO capture timing profile requires the left reference camera");
             for (const auto& [_, profile] : active_profiles_)
@@ -2250,13 +2288,31 @@ public:
                                    first->getFormat() == OB_FORMAT_H265 ? "h265" :
                                                                           "mjpg";
         const bool audio = config_.enable_audio || !config_.audio_output.empty();
-        time_alignment_.configure(
-            { selected_device_serial_, selected_firmware_,
-              std::to_string(ob::Version::getMajor()) + "." + std::to_string(ob::Version::getMinor()) + "." +
-                  std::to_string(ob::Version::getPatch()),
-              format, first->getWidth(), first->getHeight(), first->getFps(), config_.enable_imu ? config_.imu_rate : 0U,
-              audio ? 48000U : 0U, static_cast<uint16_t>(audio ? 1 : 0), static_cast<uint16_t>(audio ? 16 : 0),
-              active_profiles_.count(core::EgoCameraStream_ColorRight) != 0, loaded_sdk_binary_sha256() });
+        TimingIdentity identity{ selected_device_serial_,
+                                 selected_firmware_,
+                                 std::to_string(ob::Version::getMajor()) + "." + std::to_string(ob::Version::getMinor()) +
+                                     "." + std::to_string(ob::Version::getPatch()),
+                                 format,
+                                 first->getWidth(),
+                                 first->getHeight(),
+                                 first->getFps(),
+                                 config_.enable_imu ? config_.imu_rate : 0U,
+                                 audio ? 48000U : 0U,
+                                 static_cast<uint16_t>(audio ? 1 : 0),
+                                 static_cast<uint16_t>(audio ? 16 : 0),
+                                 active_profiles_.count(core::EgoCameraStream_ColorRight) != 0,
+                                 loaded_sdk_binary_sha256() };
+        for (const auto& [stream, profile] : active_profiles_)
+        {
+            const std::string stream_format = profile->getFormat() == OB_FORMAT_H264 ? "h264" :
+                                              profile->getFormat() == OB_FORMAT_H265 ? "h265" :
+                                                                                       "mjpg";
+            identity.videos.emplace(
+                camera_stream_descriptor(stream).timing_name,
+                VideoTimingProfile{ stream_format, profile->getWidth(), profile->getHeight(), profile->getFps() });
+        }
+        identity.side_capable_device = selected_device_has_side_sensors_;
+        time_alignment_.configure(identity);
     }
 
     void attach_time_alignment(core::EgoCalibrationT& value)
@@ -2274,34 +2330,38 @@ public:
         value.capture_epoch = capture_epoch_ + (recovering_ ? 1U : 0U);
         time_alignment_.begin_epoch(value.capture_epoch);
         std::string sdk_calibration_error;
+        const bool quad = selected_device_has_side_sensors_;
         try
         {
-            const auto fill_structured_calibration = [this, &value](const std::shared_ptr<ob::Config>& config)
+            if (!quad)
             {
-                const auto param = pipeline_->getCalibrationParam(config);
-                value.color_left = camera_intrinsics(param, OB_SENSOR_COLOR_LEFT);
-                value.color_right = camera_intrinsics(param, OB_SENSOR_COLOR_RIGHT);
-                value.left_to_right = extrinsics(param, OB_SENSOR_COLOR_LEFT, OB_SENSOR_COLOR_RIGHT);
-                value.accel_to_left = extrinsics(param, OB_SENSOR_ACCEL, OB_SENSOR_COLOR_LEFT);
-                value.gyro_to_left = extrinsics(param, OB_SENSOR_GYRO, OB_SENSOR_COLOR_LEFT);
-            };
-            try
-            {
-                fill_structured_calibration(pipeline_config);
-            }
-            catch (const ob::Error&)
-            {
-                // Firmware calibration is indexed by MJPEG profiles even when the active stream is H.264/H.265.
-                auto calibration_config = std::make_shared<ob::Config>();
-                for (const auto& [stream, profile] : active_profiles_)
+                const auto fill_structured_calibration = [this, &value](const std::shared_ptr<ob::Config>& config)
                 {
-                    const auto fallback =
-                        device_->getSensor(to_ob_sensor(stream))
-                            ->getStreamProfileList()
-                            ->getVideoStreamProfile(profile->getWidth(), profile->getHeight(), OB_FORMAT_MJPG, 0);
-                    calibration_config->enableStream(fallback);
+                    const auto param = pipeline_->getCalibrationParam(config);
+                    value.color_left = camera_intrinsics(param, OB_SENSOR_COLOR_LEFT);
+                    value.color_right = camera_intrinsics(param, OB_SENSOR_COLOR_RIGHT);
+                    value.left_to_right = extrinsics(param, OB_SENSOR_COLOR_LEFT, OB_SENSOR_COLOR_RIGHT);
+                    value.accel_to_left = extrinsics(param, OB_SENSOR_ACCEL, OB_SENSOR_COLOR_LEFT);
+                    value.gyro_to_left = extrinsics(param, OB_SENSOR_GYRO, OB_SENSOR_COLOR_LEFT);
+                };
+                try
+                {
+                    fill_structured_calibration(pipeline_config);
                 }
-                fill_structured_calibration(calibration_config);
+                catch (const ob::Error&)
+                {
+                    // Firmware calibration is indexed by MJPEG profiles even when the active stream is H.264/H.265.
+                    auto calibration_config = std::make_shared<ob::Config>();
+                    for (const auto& [stream, profile] : active_profiles_)
+                    {
+                        const auto fallback =
+                            device_->getSensor(to_ob_sensor(stream))
+                                ->getStreamProfileList()
+                                ->getVideoStreamProfile(profile->getWidth(), profile->getHeight(), OB_FORMAT_MJPG, 0);
+                        calibration_config->enableStream(fallback);
+                    }
+                    fill_structured_calibration(calibration_config);
+                }
             }
         }
         catch (const ob::Error& error)
@@ -2312,7 +2372,7 @@ public:
         {
             value.raw_alignment_yaml = raw_data(device_, OB_RAW_DATA_ALIGN_CALIB_YAML);
             value.raw_imu_yaml = raw_data(device_, OB_RAW_DATA_IMU_CALIB_YAML);
-            if ((!value.color_left || !value.color_right) &&
+            if (!quad && (!value.color_left || !value.color_right) &&
                 !populate_stereo_calibration_from_yaml(value.raw_alignment_yaml, value))
                 detail::log_error() << "Raw alignment calibration does not contain a usable stereo pair." << std::endl;
         }
@@ -2328,6 +2388,7 @@ public:
             else
                 detail::log_error() << "Structured calibration unavailable: " << sdk_calibration_error << std::endl;
         }
+        populate_video_calibration(device_, active_profiles_, value);
         const auto now = core::os_monotonic_now_ns();
         attach_time_alignment(value);
         last_calibration_ = value;
@@ -2385,7 +2446,22 @@ public:
             write_extrinsics("gyro_to_left", value.gyro_to_left);
             json << ",\n  \"raw_alignment_yaml\": \"" << json_escape(value.raw_alignment_yaml)
                  << "\",\n  \"raw_imu_yaml\": \"" << json_escape(value.raw_imu_yaml)
-                 << "\",\n  \"time_alignment\": " << value.time_alignment->json << "\n}\n";
+                 << "\",\n  \"time_alignment\": " << value.time_alignment->json << ",\n  \"video_streams\": [";
+            for (size_t index = 0; index < value.video_streams.size(); ++index)
+            {
+                const auto& entry = *value.video_streams[index];
+                json << (index == 0 ? "" : ",") << "{\"stream\":\"" << core::EnumNameEgoCameraStream(entry.stream)
+                     << "\",\"reference_stream\":\"" << core::EnumNameEgoCameraStream(entry.reference_stream)
+                     << "\",\"intrinsics_source\":\"" << json_escape(entry.intrinsics_source)
+                     << "\",\"extrinsics_source\":\"" << json_escape(entry.extrinsics_source)
+                     << "\",\"intrinsics_error\":\"" << json_escape(entry.intrinsics_error)
+                     << "\",\"extrinsics_error\":\"" << json_escape(entry.extrinsics_error) << "\",";
+                write_intrinsics("intrinsics", entry.intrinsics);
+                json << ",";
+                write_extrinsics("to_reference", entry.to_reference);
+                json << "}";
+            }
+            json << "]\n}\n";
             if (!json)
                 throw std::runtime_error("Unable to write calibration output: " + config_.calibration_output);
         }
@@ -2500,6 +2576,7 @@ private:
     std::string selected_device_serial_;
     uint16_t selected_device_vid_ = 0;
     uint16_t selected_device_pid_ = 0;
+    bool selected_device_has_side_sensors_ = false;
     std::string selected_firmware_;
     std::string initial_profile_description_;
     std::string recovery_reason_;

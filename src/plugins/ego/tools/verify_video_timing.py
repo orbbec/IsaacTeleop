@@ -7,6 +7,7 @@ import struct
 import sys
 
 from mcap.reader import make_reader
+from stream_inventory import STREAM_IDS, requested_streams
 
 
 def unpack_from(fmt, data, offset, label):
@@ -46,6 +47,7 @@ def video_record(data, embedded_media):
         raise SystemExit("Ego video record is missing data or DeviceDataTimestamp")
     (data_offset,) = unpack_from("<I", data, data_position, "video data table")
     data_table = data_position + data_offset
+    stream_id = scalar_field(data, data_table, 0, "<b", 0)
     timestamp = unpack_from("<qqq", data, timestamp_position, "DeviceDataTimestamp")[2]
     sequence = scalar_field(data, data_table, 1, "<Q", 0)
     width = scalar_field(data, data_table, 2, "<I", 0)
@@ -53,15 +55,36 @@ def video_record(data, embedded_media):
     fps = scalar_field(data, data_table, 4, "<I", 0)
     pixel_format = scalar_field(data, data_table, 5, "<B", 0)
     capture_epoch = scalar_field(data, data_table, 7 if embedded_media else 8, "<I", 0)
-    return timestamp, sequence, (pixel_format, width, height, fps), capture_epoch
+    return (
+        stream_id,
+        timestamp,
+        sequence,
+        (pixel_format, width, height, fps),
+        capture_epoch,
+    )
 
 
 path, mode = sys.argv[1:3]
-expected_counts = {
-    "ColorLeft": int(sys.argv[3]),
-    "ColorRight": int(sys.argv[4]),
-}
-manifest_path = Path(sys.argv[5])
+if sys.argv[3].isdigit():
+    expected_counts = {"ColorLeft": int(sys.argv[3]), "ColorRight": int(sys.argv[4])}
+    manifest_path = Path(sys.argv[5])
+else:
+    manifest_path = Path(sys.argv[3])
+    pairs = [argument.split("=", 1) for argument in sys.argv[4:]]
+    if (
+        not pairs
+        or any(len(pair) != 2 for pair in pairs)
+        or len({pair[0] for pair in pairs}) != len(pairs)
+    ):
+        raise SystemExit("Expected unique STREAM=decoded-count arguments")
+    expected_counts = {name: int(count) for name, count in pairs}
+if any(name not in STREAM_IDS or count <= 0 for name, count in expected_counts.items()):
+    raise SystemExit(
+        "Video counts must identify known streams and positive decoded counts"
+    )
+requested_names = requested_streams(manifest_path)
+if requested_names is not None and set(requested_names) != set(expected_counts):
+    raise SystemExit("Decoded video inventory differs from requested profile")
 requested_profiles = {}
 if manifest_path.exists():
     try:
@@ -105,9 +128,13 @@ with open(path, "rb") as stream:
         state = topics.get(channel.topic)
         if state is None:
             continue
-        timestamp, sequence, profile, capture_epoch = video_record(
+        stream_id, timestamp, sequence, profile, capture_epoch = video_record(
             message.data, channel.topic.startswith("ego_media/")
         )
+        if stream_id != STREAM_IDS[state["stream"]]:
+            raise SystemExit(
+                f"{channel.topic} contains mismatched video stream id {stream_id}"
+            )
         epoch = state["epochs"].setdefault(
             capture_epoch,
             {

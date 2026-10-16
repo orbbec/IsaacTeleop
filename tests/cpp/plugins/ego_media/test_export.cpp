@@ -59,36 +59,46 @@ int run_export(const fs::path& source, const fs::path& output)
     return WEXITSTATUS(status);
 }
 
-void write_fixture(const fs::path& path, bool wrong_video_stream = false, bool wrong_pcm_size = false)
+void write_fixture(const fs::path& path,
+                   bool wrong_video_stream = false,
+                   bool wrong_pcm_size = false,
+                   bool quad = false,
+                   bool with_audio = true)
 {
     mcap::McapWriter writer;
     mcap::McapWriterOptions options("ego");
     options.compression = mcap::Compression::None;
     REQUIRE(writer.open(path.string(), options).ok());
-    core::McapTrackerChannels<core::EgoEncodedVideoFrameRecord> video(writer, "ego_media", { "ColorLeft", "ColorRight" });
-    core::McapTrackerChannels<core::EgoPcmAudioChunkRecord> audio(writer, "ego_media", { "Audio" });
-    for (size_t index = 0; index < 2; ++index)
+    std::vector<std::string> names{ "ColorLeft", "ColorRight" };
+    if (quad)
+        names.insert(names.end(), { "ColorSideLeft", "ColorSideRight" });
+    core::McapTrackerChannels<core::EgoEncodedVideoFrameRecord> video(writer, "ego_media", names);
+    for (size_t index = 0; index < names.size(); ++index)
     {
         for (uint64_t sequence = 0; sequence < 2; ++sequence)
         {
             core::EgoEncodedVideoFrameT frame;
-            frame.stream = static_cast<core::EgoCameraStream>(wrong_video_stream ? 1 - index : index);
+            frame.stream = static_cast<core::EgoCameraStream>(wrong_video_stream ? (index + 1) % names.size() : index);
             frame.sequence_number = sequence;
             frame.width = 1600;
-            frame.height = 1300;
+            frame.height = quad ? 1200 : 1300;
             frame.fps = 30;
             frame.encoded_data = { 0xff, 0xd8, static_cast<uint8_t>(index), 0xff, 0xd9 };
             video.write(index, core::pack_record<core::EgoEncodedVideoFrameRecord>(
                                    &frame, core::DeviceDataTimestamp(100 + sequence, 90 + sequence, 80 + sequence)));
         }
     }
-    core::EgoPcmAudioChunkT pcm;
-    pcm.sample_rate_hz = 48000;
-    pcm.channel_count = 1;
-    pcm.bits_per_sample = 16;
-    pcm.sample_count = wrong_pcm_size ? 3 : 2;
-    pcm.pcm_data = { 1, 2, 3, 4 };
-    audio.write(0, core::pack_record<core::EgoPcmAudioChunkRecord>(&pcm, core::DeviceDataTimestamp(101, 91, 81)));
+    if (with_audio)
+    {
+        core::McapTrackerChannels<core::EgoPcmAudioChunkRecord> audio(writer, "ego_media", { "Audio" });
+        core::EgoPcmAudioChunkT pcm;
+        pcm.sample_rate_hz = 48000;
+        pcm.channel_count = 1;
+        pcm.bits_per_sample = 16;
+        pcm.sample_count = wrong_pcm_size ? 3 : 2;
+        pcm.pcm_data = { 1, 2, 3, 4 };
+        audio.write(0, core::pack_record<core::EgoPcmAudioChunkRecord>(&pcm, core::DeviceDataTimestamp(101, 91, 81)));
+    }
     writer.close();
 }
 } // namespace
@@ -129,6 +139,10 @@ TEST_CASE("ego_media_export rejects mismatched media and incomplete input", "[eg
     {
         write_fixture(source, false, true);
     }
+    SECTION("quad video topics do not match payloads")
+    {
+        write_fixture(source, true, false, true, false);
+    }
     SECTION("footer is truncated")
     {
         write_fixture(source);
@@ -146,6 +160,23 @@ TEST_CASE("ego_media_export rejects mismatched media and incomplete input", "[eg
     }
     CHECK(run_export(source, output) != 0);
     CHECK(fs::exists(source));
+}
+
+TEST_CASE("ego_media_export discovers all quad streams without audio", "[ego][unit]")
+{
+    TemporaryDirectory directory;
+    const auto source = directory.path / "source.mcap";
+    const auto output = directory.path / "export";
+    write_fixture(source, false, false, true, false);
+    REQUIRE(run_export(source, output) == 0);
+    const std::vector<std::string> names{ "ColorLeft", "ColorRight", "ColorSideLeft", "ColorSideRight" };
+    for (size_t index = 0; index < names.size(); ++index)
+    {
+        const auto marker = static_cast<uint8_t>(index);
+        CHECK(read_bytes(output / (names[index] + ".mjpg")) ==
+              std::vector<uint8_t>{ 0xff, 0xd8, marker, 0xff, 0xd9, 0xff, 0xd8, marker, 0xff, 0xd9 });
+    }
+    CHECK_FALSE(fs::exists(output / "Audio.wav"));
 }
 
 #if defined(__linux__)

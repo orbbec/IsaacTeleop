@@ -3,8 +3,8 @@
 """EGO stereo source for camera_viz.
 
 One source owns a native Capture instance and a producer thread. Each Frame
-contains paired ColorLeft/ColorRight GPU RGBA8 images. The binding rejects
-missing eyes or device timestamps more than 2 ms apart; publication uses
+contains two selected GPU RGBA8 images (ColorLeft/ColorRight by default).
+The binding rejects missing eyes or device timestamps more than 2 ms apart; publication uses
 host monotonic time sampled after payload extraction, not camera exposure time.
 
 MJPEG uses SDK conversion to host RGB, pinned staging, and CUDA upload.
@@ -52,6 +52,8 @@ class EgoSource(FrameSource):
         gpu_id: int = 0,
         *,
         renderer_cuda_device_id: int | None = None,
+        left_stream: str = "ColorLeft",
+        right_stream: str = "ColorRight",
     ) -> None:
         if width <= 0 or height <= 0 or fps <= 0:
             raise ValueError("EGO width, height, and fps must be positive")
@@ -61,6 +63,21 @@ class EgoSource(FrameSource):
         self._format = format.lower()
         if self._format not in ("mjpg", "h264", "h265"):
             raise ValueError("EGO format must be mjpg, h264, or h265")
+        video_streams = ("ColorLeft", "ColorRight", "ColorSideLeft", "ColorSideRight")
+        if left_stream not in video_streams or right_stream not in video_streams:
+            raise ValueError(
+                "EGO preview streams must name ColorLeft, ColorRight, ColorSideLeft, or ColorSideRight"
+            )
+        if left_stream == right_stream:
+            raise ValueError(
+                "EGO left_stream and right_stream must select different streams"
+            )
+        self._left_stream, self._right_stream = left_stream, right_stream
+        self._capture_streams = (
+            {}
+            if (left_stream, right_stream) == ("ColorLeft", "ColorRight")
+            else {"left_stream": left_stream, "right_stream": right_stream}
+        )
         self._requested_gpu_id = gpu_id
         self._renderer_cuda_device_id = renderer_cuda_device_id
         self._gpu_id = gpu_id
@@ -241,6 +258,7 @@ class EgoSource(FrameSource):
                             self._spec.height,
                             self._fps,
                             self._format,
+                            **self._capture_streams,
                         )
                         notify("ego", "connected")
                     except Exception as exc:

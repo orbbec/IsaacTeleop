@@ -2,11 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers.hpp>
 #include <ego_camera/cancellation.hpp>
 #include <ego_camera/ego_camera.hpp>
+#include <ego_camera/streams.hpp>
 #include <ego_mcap/checked_write.hpp>
 #include <schema/ego_camera_bfbs_generated.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -94,6 +97,14 @@ std::vector<uint8_t> read_bytes(const std::filesystem::path& path)
 {
     std::ifstream input(path, std::ios::binary);
     return { std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>() };
+}
+
+std::vector<uint8_t> hex_bytes(const std::string& hex)
+{
+    std::vector<uint8_t> bytes;
+    for (size_t index = 0; index < hex.size(); index += 2)
+        bytes.push_back(static_cast<uint8_t>(std::stoul(hex.substr(index, 2), nullptr, 16)));
+    return bytes;
 }
 
 } // namespace
@@ -226,6 +237,145 @@ TEST_CASE("EGO embedded FrameSink does not require sidecar paths", "[ego][writer
     sink.on_frame(frame);
     REQUIRE(media_sink_ptr->frames.size() == 1);
     CHECK(media_sink_ptr->frames.front().metadata.encoded_bytes == frame.encoded_data.size());
+}
+
+TEST_CASE("EGO capture validates requested cameras against the selected device", "[ego][quad][profile]")
+{
+    std::vector<plugins::ego::StreamConfig> quad;
+    std::vector<core::EgoCameraStream> quad_available;
+    for (const auto& descriptor : plugins::ego::kCameraStreams)
+    {
+        quad.push_back({ descriptor.stream, "" });
+        quad_available.push_back(descriptor.stream);
+    }
+    const std::vector<core::EgoCameraStream> stereo_available{ core::EgoCameraStream_ColorLeft,
+                                                               core::EgoCameraStream_ColorRight };
+    const std::vector<plugins::ego::StreamConfig> stereo{ quad[0], quad[1] };
+    REQUIRE_NOTHROW(plugins::ego::validate_available_streams(stereo, stereo_available));
+    REQUIRE_NOTHROW(plugins::ego::validate_available_streams(stereo, quad_available));
+    REQUIRE_NOTHROW(plugins::ego::validate_available_streams(quad, quad_available));
+    REQUIRE_THROWS_WITH(plugins::ego::validate_available_streams(quad, stereo_available),
+                        "Requested Ego camera sensors unavailable: ColorSideLeft, ColorSideRight");
+    REQUIRE_THROWS_WITH(plugins::ego::validate_available_streams({ quad[3] }, stereo_available),
+                        "Requested Ego camera sensors unavailable: ColorSideRight");
+}
+
+TEST_CASE("EGO capture rejects duplicate and unknown stream identities before creating outputs", "[ego][quad][writer]")
+{
+    const auto output = std::filesystem::temp_directory_path() / "ego_invalid_stream_selection.mjpg";
+    plugins::ego::CaptureConfig capture;
+    std::vector<plugins::ego::StreamConfig> streams{ { core::EgoCameraStream_ColorSideLeft, output.string() } };
+    SECTION("duplicate stream")
+    {
+        streams.push_back({ core::EgoCameraStream_ColorSideLeft, "" });
+    }
+    SECTION("unknown stream")
+    {
+        streams[0].camera = static_cast<core::EgoCameraStream>(127);
+    }
+    REQUIRE_THROWS_AS(plugins::ego::create_frame_sink(streams, capture), std::invalid_argument);
+    CHECK_FALSE(std::filesystem::exists(output));
+}
+
+TEST_CASE("EGO side streams reject stereo-only options before creating outputs", "[ego][quad][profile]")
+{
+    const auto output = std::filesystem::temp_directory_path() / "ego_side_stream_option.mjpg";
+    const std::vector<plugins::ego::StreamConfig> streams{ { core::EgoCameraStream_ColorSideRight, output.string() } };
+    plugins::ego::CaptureConfig capture;
+    SECTION("SDL preview")
+    {
+        capture.preview = true;
+    }
+    SECTION("version-1 time profile")
+    {
+        capture.time_alignment = "unused-stereo-profile.json";
+    }
+    REQUIRE_THROWS_AS(plugins::ego::create_frame_sink(streams, capture), std::invalid_argument);
+    CHECK_FALSE(std::filesystem::exists(output));
+}
+
+TEST_CASE("EGO auxiliary-only FrameSink remains valid", "[ego][writer][metadata]")
+{
+    REQUIRE_NOTHROW(plugins::ego::validate_capture_streams({}, {}));
+    plugins::ego::FrameSink sink({}, nullptr, false);
+    REQUIRE_NOTHROW(sink.close_media());
+    REQUIRE_NOTHROW(sink.close_metadata());
+    REQUIRE_NOTHROW(sink.commit_metadata());
+}
+
+TEST_CASE("EGO four encoded streams keep independent recording gates across loss and epochs", "[ego][quad][writer]")
+{
+    for (const auto format : { core::EgoPixelFormat_H264, core::EgoPixelFormat_H265 })
+    {
+        std::vector<plugins::ego::StreamConfig> streams;
+        for (const auto& descriptor : plugins::ego::kCameraStreams)
+        {
+            streams.push_back({ descriptor.stream, "" });
+            streams.back().pixel_format = format;
+        }
+        auto metadata = std::make_unique<RecordingMediaSink>();
+        auto* observed = metadata.get();
+        plugins::ego::FrameSink sink(streams, std::move(metadata), false);
+        std::vector<uint8_t> predicted;
+        append_nal(predicted, format == core::EgoPixelFormat_H264 ? std::initializer_list<uint8_t>{ 0x41, 0x01 } :
+                                                                    std::initializer_list<uint8_t>{ 0x02, 0x01, 0x01 });
+        plugins::ego::CapturedFrame frame;
+        frame.metadata.pixel_format = format;
+        frame.sample_time_raw_device_clock_ns = 17;
+        frame.sample_time_local_common_clock_ns = 23;
+        for (const auto& descriptor : plugins::ego::kCameraStreams)
+        {
+            frame.metadata.stream = descriptor.stream;
+            frame.metadata.sequence_number = 0;
+            frame.encoded_data = predicted;
+            sink.on_frame(frame);
+            frame.metadata.sequence_number = 1;
+            frame.encoded_data = parameterized_idr(format);
+            sink.on_frame(frame);
+        }
+        REQUIRE(observed->frames.size() == 4);
+        for (size_t index = 0; index < observed->frames.size(); ++index)
+        {
+            CHECK(observed->frames[index].metadata.stream == plugins::ego::kCameraStreams[index].stream);
+            CHECK(observed->frames[index].sample_time_raw_device_clock_ns == 17);
+            CHECK(observed->frames[index].sample_time_local_common_clock_ns == 23);
+        }
+        frame.encoded_data = predicted;
+        for (const auto& descriptor : plugins::ego::kCameraStreams)
+        {
+            frame.metadata.stream = descriptor.stream;
+            frame.metadata.sequence_number = descriptor.stream == core::EgoCameraStream_ColorSideLeft ? 3 : 2;
+            sink.on_frame(frame);
+        }
+        REQUIRE(observed->frames.size() == 7);
+        frame.metadata.stream = core::EgoCameraStream_ColorSideLeft;
+        frame.metadata.sequence_number = 4;
+        frame.encoded_data = parameterized_idr(format);
+        sink.on_frame(frame);
+        REQUIRE(observed->frames.size() == 8);
+        CHECK(observed->frames.back().metadata.stream == core::EgoCameraStream_ColorSideLeft);
+
+        sink.begin_capture_epoch();
+        frame.metadata.capture_epoch = 1;
+        frame.metadata.sequence_number = 0;
+        frame.encoded_data = predicted;
+        for (const auto& descriptor : plugins::ego::kCameraStreams)
+        {
+            frame.metadata.stream = descriptor.stream;
+            sink.on_frame(frame);
+        }
+        REQUIRE(observed->frames.size() == 8);
+        frame.metadata.sequence_number = 1;
+        frame.encoded_data = parameterized_idr(format);
+        for (const auto& descriptor : plugins::ego::kCameraStreams)
+        {
+            frame.metadata.stream = descriptor.stream;
+            sink.on_frame(frame);
+        }
+        REQUIRE(observed->frames.size() == 12);
+        for (size_t index = 8; index < observed->frames.size(); ++index)
+            CHECK(observed->frames[index].metadata.capture_epoch == 1);
+    }
 }
 
 TEST_CASE("EGO stream validation delegates encoded FPS support to SDK profile selection", "[ego][profile]")
@@ -423,6 +573,90 @@ TEST_CASE("EGO FrameSink preserves non-timestamp H264 and H265 SEI", "[ego][writ
         REQUIRE(read_bytes(output) == encoded);
         std::filesystem::remove(output);
     }
+}
+
+TEST_CASE("EGOPRO FrameSink removes the measured four H264 timestamp tails", "[ego][quad][writer]")
+{
+    // Exact final NALs from SDK 6f302abc / FW 1.1.1, quad_raw capture (2026-10-16).
+    // Their vendor labels remain opaque; the stream identities come from the SDK frame types.
+    const std::array<std::string, 4> fixtures{
+        "0000000106052d45474f2d34423030303030305f52532c74696d657374616d705f75733d3137393231333837353532363434343280",
+        "0000000106052d45474f2d34423030303030305f304c2c74696d657374616d705f75733d3137393231333837353532363434333480",
+        "0000000106052d45474f2d34423030303030305f4c532c74696d657374616d705f75733d3137393231333837353532363434343480",
+        "0000000106052d45474f2d34423030303030305f30522c74696d657374616d705f75733d3137393231333837353532363434333980",
+    };
+    for (size_t index = 0; index < fixtures.size(); ++index)
+    {
+        auto expected = parameterized_idr(core::EgoPixelFormat_H264);
+        append_sei(expected, core::EgoPixelFormat_H264, "preserve ordinary user data");
+        auto encoded = expected;
+        const auto tail = hex_bytes(fixtures[index]);
+        REQUIRE(tail.size() == 53);
+        encoded.insert(encoded.end(), tail.begin(), tail.end());
+        auto metadata = std::make_unique<RecordingMediaSink>();
+        auto* observed = metadata.get();
+        plugins::ego::StreamConfig stream{ plugins::ego::kCameraStreams[index].stream, "" };
+        stream.pixel_format = core::EgoPixelFormat_H264;
+        plugins::ego::FrameSink sink({ stream }, std::move(metadata), false);
+        plugins::ego::CapturedFrame frame;
+        frame.metadata.stream = stream.camera;
+        frame.metadata.pixel_format = stream.pixel_format;
+        frame.encoded_data = encoded;
+        sink.on_frame(frame);
+        REQUIRE(observed->frames.size() == 1);
+        CHECK(observed->frames.front().encoded_data == expected);
+        CHECK(observed->frames.front().metadata.encoded_bytes == expected.size());
+        CHECK(frame.encoded_data == encoded);
+    }
+}
+
+TEST_CASE("EGOPRO timestamp cleaning preserves unrecognized SEI envelopes and payloads", "[ego][quad][writer]")
+{
+    const auto measured = hex_bytes(
+        "0000000106052d45474f2d34423030303030305f52532c74696d657374616d705f75733d3137393231333837353532363434343280");
+    auto sei = measured;
+    SECTION("another SEI message type")
+    {
+        sei[5] = 0x04;
+    }
+    SECTION("inconsistent payload length")
+    {
+        sei[6] = 44;
+    }
+    SECTION("unrecognized vendor prefix")
+    {
+        sei[7] = 'X';
+    }
+    SECTION("unrecognized sensor tag")
+    {
+        sei[20] = 'X';
+    }
+    SECTION("nondecimal timestamp")
+    {
+        sei[36] = 'x';
+    }
+    SECTION("different trailing bits")
+    {
+        sei.back() = 0x81;
+    }
+    SECTION("additional payload content")
+    {
+        sei.insert(sei.end() - 1, 'x');
+    }
+    auto expected = parameterized_idr(core::EgoPixelFormat_H264);
+    expected.insert(expected.end(), sei.begin(), sei.end());
+    auto metadata = std::make_unique<RecordingMediaSink>();
+    auto* observed = metadata.get();
+    plugins::ego::StreamConfig stream{ core::EgoCameraStream_ColorSideLeft, "" };
+    stream.pixel_format = core::EgoPixelFormat_H264;
+    plugins::ego::FrameSink sink({ stream }, std::move(metadata), false);
+    plugins::ego::CapturedFrame frame;
+    frame.metadata.stream = stream.camera;
+    frame.metadata.pixel_format = stream.pixel_format;
+    frame.encoded_data = expected;
+    sink.on_frame(frame);
+    REQUIRE(observed->frames.size() == 1);
+    CHECK(observed->frames.front().encoded_data == expected);
 }
 
 TEST_CASE("EGO FrameSink observers share the canonical recording gate", "[ego][writer][preview]")

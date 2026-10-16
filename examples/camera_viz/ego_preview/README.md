@@ -6,9 +6,9 @@ SPDX-License-Identifier: Apache-2.0
 # EGO live-preview binding
 
 This directory connects the OrbbecSDK to the local `camera_viz` EGO source.
-It opens one camera's ColorLeft/ColorRight streams and returns paired host
-payloads. The Python source publishes GPU images through NVIDIA's existing
-`FrameSource` interface; the viewer keeps its normal rendering lifecycle.
+It opens two selected streams from one EGO or EGOPRO and returns paired host
+payloads. The default selection remains ColorLeft/ColorRight. The Python source
+publishes GPU images through NVIDIA's existing `FrameSource` interface; the viewer keeps its normal rendering lifecycle.
 
 ## Responsibilities and data flow
 
@@ -82,8 +82,9 @@ GPU upload. See the [viewer guide](../README.md) for setup and run commands.
 
 ## Pair contract and device ownership
 
-`Capture(device_uid, width, height, fps, format)` opens the requested stereo
-profile. An empty UID selects the first enumerated device. `next_pair(timeout_ms)`
+`Capture(device_uid, width, height, fps, format, left_stream="ColorLeft",
+right_stream="ColorRight")` opens the requested two-stream profile. An empty
+UID selects the first enumerated device. `next_pair(timeout_ms)`
 returns a dictionary with `left`/`right` payload bytes, `timestamp_ns`,
 `device_timestamp_ns`, and `sequence_left`/`sequence_right`.
 
@@ -101,6 +102,32 @@ returns a dictionary with `left`/`right` payload bytes, `timestamp_ns`,
 - Payload bytes own their data after the SDK frame is released. GPU Frames
   refer to reusable source buffers and must be consumed through the viewer's
   existing FrameSource lifecycle.
+
+The optional `left_stream` and `right_stream` names select any two distinct SDK
+streams from `ColorLeft`, `ColorRight`, `ColorSideLeft`, and `ColorSideRight`.
+The selected device must expose both profiles. The names identify SDK streams;
+they do not establish physical lens positions or calibrated stereo geometry.
+`left` and `right` in the payload name the two display slots. Selecting side
+cameras does not create a verified stereo pair or change the timestamp checks.
+For example, a local EGOPRO window preview can select its side streams:
+
+```yaml
+cameras:
+  - name: egopro_side
+    type: ego
+    stereo: true
+    width: 1600
+    height: 1200
+    fps: 30
+    format: h264
+    left_stream: ColorSideLeft
+    right_stream: ColorSideRight
+```
+
+Use `--mode window --stereo-debug sbs` to inspect both selected images. One
+source owns one device pipeline; do not add multiple entries for the same
+physical device to emulate four simultaneous views. Four-view rendering and
+physical stereo calibration require separate validation.
 
 The source producer serializes reads and SDK close. Open failures retry;
 capture-read exceptions close/reopen the pipeline and reset encoded decoders.

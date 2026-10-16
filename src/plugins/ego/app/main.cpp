@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include <ego_camera/ego_camera.hpp>
+#include <ego_camera/streams.hpp>
 #include <ego_camera/time_alignment.hpp>
 #include <log_bridge/logger.hpp>
 
@@ -27,11 +28,11 @@ void signal_handler(int signal)
 
 core::EgoCameraStream parse_camera_name(const std::string& name)
 {
-    if (name == "ColorLeft")
-        return core::EgoCameraStream_ColorLeft;
-    if (name == "ColorRight")
-        return core::EgoCameraStream_ColorRight;
-    throw std::runtime_error("Unknown camera name: '" + name + "'. Expected ColorLeft or ColorRight.");
+    for (const auto& descriptor : plugins::ego::kCameraStreams)
+        if (name == descriptor.name)
+            return descriptor.stream;
+    throw std::runtime_error("Unknown camera name: '" + name +
+                             "'. Expected ColorLeft, ColorRight, ColorSideLeft, or ColorSideRight.");
 }
 
 core::EgoPixelFormat parse_pixel_format(const std::string& value)
@@ -108,7 +109,9 @@ void print_usage(const char* program)
     std::cout << "Usage: " << program << " [options] --add-stream=camera=<name>[,output=<path>]\n\n"
               << "Streams (repeatable):\n"
               << "  --add-stream=camera=ColorLeft[,output=<path>][,format=mjpg|h264|h265,width=N,height=N,fps=N]\n"
-              << "  --add-stream=camera=ColorRight[,output=<path>][,format=mjpg|h264|h265,width=N,height=N,fps=N]\n\n"
+              << "  --add-stream=camera=ColorRight[,output=<path>][,format=mjpg|h264|h265,width=N,height=N,fps=N]\n"
+              << "  --add-stream=camera=ColorSideLeft[,output=<path>][,format=mjpg|h264|h265,width=N,height=N,fps=N]\n"
+              << "  --add-stream=camera=ColorSideRight[,output=<path>][,format=mjpg|h264|h265,width=N,height=N,fps=N]\n\n"
               << "Capture:\n"
               << "  --width=N --height=N --fps=N  0 selects the SDK default profile\n"
               << "  --bitrate=N --dynamic-bitrate=on|off\n"
@@ -116,7 +119,7 @@ void print_usage(const char* program)
               << "  --reconnect-timeout=N          Wait N seconds for the same physical device; 0 disables recovery "
                  "(default 30)\n"
               << "  --reconnect-interval-ms=N      Device re-enumeration interval (default 1000)\n"
-              << "  --preview                      SDL side-by-side latest-frame preview\n"
+              << "  --preview                      SDL ColorLeft/ColorRight latest-frame preview (no side streams)\n"
               << "  --enable-imu --imu-rate=400|1000\n"
               << "  --accel-full-scale=<g> --gyro-full-scale=<dps>\n"
               << "  --enable-audio                 Capture PCM audio (embedded MCAP needs no WAV path)\n"
@@ -301,6 +304,7 @@ try
         streams.push_back(std::move(stream));
     }
 
+    plugins::ego::validate_capture_streams(streams, capture_config);
     plugins::ego::validate_time_alignment_profile(capture_config.time_alignment);
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);

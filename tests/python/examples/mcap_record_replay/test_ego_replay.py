@@ -56,8 +56,9 @@ class Replay:
 
 
 class Tracker:
-    def __init__(self, *_):
-        pass
+    def __init__(self, prefix, streams=None):
+        self.prefix = prefix
+        self.streams = streams
 
     def get_data(self, session):
         if session.updates == 2:
@@ -81,8 +82,14 @@ class Tracker:
             event=EgoRecoveryEvent(EgoRecoveryStage.Recovered, "recovered", 1),
         )
 
-    def get_stream_data(self, session, _):
-        return self.get_data(session)
+    def get_stream_data(self, session, index):
+        data = self.get_data(session)
+        if data is not None:
+            if self.prefix == "ego_metadata":
+                data.stream = self.streams[index]
+            else:
+                data.sensor = self.streams[index]
+        return data
 
 
 def mock_trackers(monkeypatch):
@@ -132,6 +139,62 @@ def test_recording_without_raw_topics_finishes_immediately(tmp_path, monkeypatch
     counts = replay_ego.replay(recording, 0)
     assert session.updates == 0
     assert set(counts.values()) == {0}
+
+
+@pytest.mark.parametrize("summary", [True, False])
+def test_quad_video_replay_without_optional_sensors(tmp_path, monkeypatch, summary):
+    recording = tmp_path / "quad.mcap"
+    topics = {f"ego_metadata/{name}" for name in replay_ego.VIDEO_STREAM_NAMES} | {
+        "ego_calibration/Calibration",
+        "ego_device/DeviceState",
+    }
+    write_recording(recording, summary, topics)
+    session = mock_trackers(monkeypatch)
+    counts = replay_ego.replay(recording, 0)
+    assert session.updates == 3
+    assert set(counts) == set(replay_ego.VIDEO_STREAM_NAMES) | {
+        "Calibration",
+        "DeviceState",
+    }
+    assert set(counts.values()) == {2}
+
+
+def test_empty_optional_channels_are_not_required(tmp_path, monkeypatch):
+    recording = tmp_path / "empty_aux.mcap"
+    with recording.open("wb") as stream:
+        writer = Writer(stream, compression=CompressionType.NONE)
+        writer.start()
+        for topic in TOPICS:
+            channel = writer.register_channel(topic, "test", 0)
+            if not topic.startswith(("ego_imu/", "ego_audio/")):
+                writer.add_message(channel, 1, b"test", 1)
+        writer.finish()
+    mock_trackers(monkeypatch)
+    counts = replay_ego.replay(recording, 0)
+    assert not {"Accel", "Gyro", "Audio"}.intersection(counts)
+    assert set(counts.values()) == {1}
+
+
+def test_video_topic_payload_mismatch_is_rejected(tmp_path, monkeypatch):
+    recording = tmp_path / "wrong_stream.mcap"
+    write_recording(recording, True, {"ego_metadata/ColorSideRight"})
+    mock_trackers(monkeypatch)
+
+    def wrong_stream(self, session, index):
+        data = self.get_data(session)
+        data.stream = replay_ego.EgoCameraStream.ColorLeft
+        return data
+
+    monkeypatch.setattr(Tracker, "get_stream_data", wrong_stream)
+    with pytest.raises(ValueError, match=r"ColorSideRight.*does not match"):
+        replay_ego.replay(recording, 0)
+
+
+def test_unknown_video_topic_is_rejected(tmp_path):
+    recording = tmp_path / "unknown.mcap"
+    write_recording(recording, True, {"ego_metadata/ColorUnknown"})
+    with pytest.raises(ValueError, match="Unknown EGO video"):
+        replay_ego.replay(recording, 0)
 
 
 @pytest.mark.parametrize("enabled", [True, False])

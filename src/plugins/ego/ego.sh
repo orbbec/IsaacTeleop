@@ -36,7 +36,8 @@ Common record options:
   --duration SECONDS              Stop cleanly after SECONDS; omit for Ctrl-C.
   --output DIRECTORY              Default: recordings/ego_<timestamp>.
   --format mjpg|h264|h265         Default: h264.
-  --width N --height N --fps N    Default: 1600 1300 30.
+  --streams stereo|quad          Default: stereo; quad selects all four RGB sensors.
+  --width N --height N --fps N    Default: 1600 1300 30 (quad: 1600 1200 30).
   --device-uid UID                Select one enumerated device.
   --reconnect-timeout SECONDS     Wait for the same physical device after disconnect (default: 30; 0 disables).
   --reconnect-interval-ms MS      Device re-enumeration interval (default: 1000).
@@ -404,15 +405,17 @@ write_requested_profile_manifest() {
     local height="$4"
     local fps="$5"
     local diagnostics="$6"
-    printf '%s\n' \
-        '{' \
-        '  "version": 1,' \
-        "  \"record_device_diagnostics\": \"$diagnostics\"," \
-        '  "streams": {' \
-        "    \"ColorLeft\": {\"format\": \"$format\", \"width\": $width, \"height\": $height, \"fps\": $fps}," \
-        "    \"ColorRight\": {\"format\": \"$format\", \"width\": $width, \"height\": $height, \"fps\": $fps}" \
-        '  }' \
-        '}' > "$output"
+    shift 6
+    local name separator=""
+    {
+        printf '{\n  "version": 1,\n  "record_device_diagnostics": "%s",\n  "streams": {\n' "$diagnostics"
+        for name in "$@"; do
+            printf '%s    "%s": {"format": "%s", "width": %s, "height": %s, "fps": %s}' \
+                "$separator" "$name" "$format" "$width" "$height" "$fps"
+            separator=$',\n'
+        done
+        printf '\n  }\n}\n'
+    } > "$output"
 }
 
 record_config_python() {
@@ -441,8 +444,9 @@ command_record() {
     local duration=""
     local run_dir=""
     local format="h264"
+    local stream_set=stereo
     local width=1600
-    local height=1300
+    local height=""
     local fps=30
     local device_uid=""
     local reconnect_timeout=30
@@ -481,7 +485,7 @@ command_record() {
     set -- "${config_args[@]}" "${original_args[@]}"
     while (( $# )); do
         case "$1" in
-            --config|--duration|--output|--format|--width|--height|--fps|--device-uid|--reconnect-timeout|--reconnect-interval-ms|--record-device-diagnostics|--mcap-media|--preset|--plugin|--plugin-option)
+            --config|--duration|--output|--format|--streams|--width|--height|--fps|--device-uid|--reconnect-timeout|--reconnect-interval-ms|--record-device-diagnostics|--mcap-media|--preset|--plugin|--plugin-option)
                 (( $# >= 2 )) && [[ -n "$2" ]] || record_usage_error "$1 requires a value"
                 ;;
         esac
@@ -491,6 +495,7 @@ command_record() {
             --duration) duration="${2:-}"; shift 2 ;;
             --output) run_dir="${2:-}"; shift 2 ;;
             --format) format="${2:-}"; shift 2 ;;
+            --streams) stream_set="${2:-}"; shift 2 ;;
             --width) width="${2:-}"; shift 2 ;;
             --height) height="${2:-}"; shift 2 ;;
             --fps) fps="${2:-}"; shift 2 ;;
@@ -515,6 +520,15 @@ command_record() {
             *) record_usage_error "unknown option '$1'" ;;
         esac
     done
+    local -a video_streams=(ColorLeft ColorRight)
+    case "$stream_set" in
+        stereo) [[ -n "$height" ]] || height=1300 ;;
+        quad)
+            video_streams+=(ColorSideLeft ColorSideRight)
+            [[ -n "$height" ]] || height=1200
+            ;;
+        *) record_usage_error "--streams must be stereo or quad" ;;
+    esac
     preset_python_version "$preset" >/dev/null
     [[ "$format" == "mjpg" || "$format" == "h264" || "$format" == "h265" ]] || record_usage_error "--format must be mjpg, h264, or h265"
     [[ "$media_mode" == "metadata-only" || "$media_mode" == "embedded" ]] || record_usage_error "--mcap-media must be metadata-only or embedded"
@@ -553,13 +567,22 @@ command_record() {
     if [[ "$media_mode" == "metadata-only" ]] || (( keep_sidecars )); then
         mkdir -p "$run_dir/raw"
     fi
-    write_requested_profile_manifest "$run_dir/requested_profile.json" "$format" "$width" "$height" "$fps" "$record_diagnostics"
+    write_requested_profile_manifest "$run_dir/requested_profile.json" "$format" "$width" "$height" "$fps" "$record_diagnostics" "${video_streams[@]}"
 
     local capabilities_file="$run_dir/capabilities.txt"
     echo "Inspecting connected device before recording..."
     emit_capabilities "$plugin" "$device_uid" | tee "$capabilities_file"
-    grep -q '^Sensor LeftColor$' "$capabilities_file" || die "Connected device has no ColorLeft sensor."
-    grep -q '^Sensor RightColor$' "$capabilities_file" || die "Connected device has no ColorRight sensor."
+    local stream sdk_sensor
+    for stream in "${video_streams[@]}"; do
+        case "$stream" in
+            ColorLeft) sdk_sensor=LeftColor ;;
+            ColorRight) sdk_sensor=RightColor ;;
+            ColorSideLeft) sdk_sensor=SideLeftColor ;;
+            ColorSideRight) sdk_sensor=SideRightColor ;;
+        esac
+        grep -Eq "^(Sensor $sdk_sensor|VideoStream $stream)$" "$capabilities_file" \
+            || die "Connected device has no $stream sensor."
+    done
 
     local enable_imu=0
     local enable_audio=0
@@ -588,17 +611,13 @@ command_record() {
         "--reconnect-timeout=$reconnect_timeout"
         "--reconnect-interval-ms=$reconnect_interval_ms"
     )
-    if [[ "$media_mode" == "metadata-only" ]] || (( keep_sidecars )); then
-        plugin_args+=(
-            "--add-stream=camera=ColorLeft,output=$run_dir/raw/ColorLeft.$extension,format=$format,width=$width,height=$height,fps=$fps"
-            "--add-stream=camera=ColorRight,output=$run_dir/raw/ColorRight.$extension,format=$format,width=$width,height=$height,fps=$fps"
-        )
-    else
-        plugin_args+=(
-            "--add-stream=camera=ColorLeft,format=$format,width=$width,height=$height,fps=$fps"
-            "--add-stream=camera=ColorRight,format=$format,width=$width,height=$height,fps=$fps"
-        )
-    fi
+    for stream in "${video_streams[@]}"; do
+        local output_arg=""
+        if [[ "$media_mode" == "metadata-only" ]] || (( keep_sidecars )); then
+            output_arg=",output=$run_dir/raw/$stream.$extension"
+        fi
+        plugin_args+=("--add-stream=camera=$stream$output_arg,format=$format,width=$width,height=$height,fps=$fps")
+    done
     [[ -n "$device_uid" ]] && plugin_args+=("--device-uid=$device_uid")
     (( preview )) && plugin_args+=(--preview)
     (( enable_imu )) && plugin_args+=(--enable-imu --imu-rate=1000)
@@ -613,7 +632,8 @@ command_record() {
     plugin_args+=("${passthrough[@]}")
 
     echo "Recording directory: $run_dir"
-    echo "Requested exact stereo profile: ${width}x${height}@${fps} ${format}; no profile fallback will be attempted."
+    echo "Requested exact $stream_set profile: ${width}x${height}@${fps} ${format}; no profile fallback will be attempted."
+    [[ "$stream_set" != quad ]] || echo "Quad certification baseline: H264 1600x1200@30; other profiles require separate validation."
     echo "Stop with Ctrl-C once; the plugin will finalize media and MCAP files."
     local capture_status
     local -a pipeline_statuses=()
@@ -723,18 +743,12 @@ decode_video() {
 
 verify_requested_profile_manifest() {
     local manifest="$1"
-    local left_signature="$2"
-    local right_signature="$3"
-    python3 "$SCRIPT_DIR/tools/verify_profile.py" "$manifest" "$left_signature" "$right_signature"
+    shift
+    python3 "$SCRIPT_DIR/tools/verify_profile.py" "$manifest" "$@"
 }
 
 verify_mcap_video_timing() {
-    local mcap="$1"
-    local mode="$2"
-    local left_frames="$3"
-    local right_frames="$4"
-    local manifest="$5"
-    python3 "$SCRIPT_DIR/tools/verify_video_timing.py" "$mcap" "$mode" "$left_frames" "$right_frames" "$manifest"
+    python3 "$SCRIPT_DIR/tools/verify_video_timing.py" "$@"
 }
 
 print_fingerprint() {
@@ -790,6 +804,12 @@ command_verify_impl() {
     python3 "$SCRIPT_DIR/tools/verify_sensor_topics.py" "${topic_check_args[@]}"
 
     check_capture_health_log "$run_dir/logs/capture.log"
+    local requested_profile_manifest="$run_dir/requested_profile.json"
+    local inventory
+    inventory="$(python3 "$SCRIPT_DIR/tools/stream_inventory.py" "$mcap" "$requested_profile_manifest")" || return 1
+    local -a video_streams=()
+    mapfile -t video_streams <<< "$inventory"
+    [[ -n "$inventory" ]] || die "No video streams were found in $mcap"
 
     local media_dir="$run_dir/raw"
     local retained_media_dir=""
@@ -807,48 +827,37 @@ command_verify_impl() {
         "$exporter" "$mcap" "$temporary_export"
         media_dir="$temporary_export"
     fi
-    local left right
-    left="$(find_media_file "$media_dir" ColorLeft)" || die "Could not find exported ColorLeft media in $media_dir"
-    right="$(find_media_file "$media_dir" ColorRight)" || die "Could not find exported ColorRight media in $media_dir"
-    if [[ -n "$retained_media_dir" ]]; then
-        local retained_left retained_right
-        retained_left="$(find_media_file "$retained_media_dir" ColorLeft)" \
-            || die "Could not find retained ColorLeft media in $retained_media_dir"
-        retained_right="$(find_media_file "$retained_media_dir" ColorRight)" \
-            || die "Could not find retained ColorRight media in $retained_media_dir"
-        cmp -s "$left" "$retained_left" || die "Embedded and retained ColorLeft media differ"
-        cmp -s "$right" "$retained_right" || die "Embedded and retained ColorRight media differ"
-        echo "Embedded video matches retained media sidecars: OK"
-    fi
-    local decoded_video_frame_count left_frames right_frames
-    decode_video ColorLeft "$left"
-    left_frames="$decoded_video_frame_count"
-    decode_video ColorRight "$right"
-    right_frames="$decoded_video_frame_count"
-    local left_signature right_signature left_probed_frames right_probed_frames
-    left_signature="$(video_signature "$left")"
-    right_signature="$(video_signature "$right")"
-    [[ -n "$left_signature" ]] || die "ffprobe found no ColorLeft video stream: $left"
-    [[ -n "$right_signature" ]] || die "ffprobe found no ColorRight video stream: $right"
-    [[ "$left_signature" == "$right_signature" ]] \
-        || die "Stereo media profiles differ: ColorLeft=$left_signature ColorRight=$right_signature"
-    local requested_profile_manifest="$run_dir/requested_profile.json"
+    local stream media retained signature probed_frames decoded_video_frame_count
+    local -a signatures=() frame_counts=()
+    local -A media_files=()
+    for stream in "${video_streams[@]}"; do
+        media="$(find_media_file "$media_dir" "$stream")" || die "Could not find exported $stream media in $media_dir"
+        media_files[$stream]="$media"
+        if [[ -n "$retained_media_dir" ]]; then
+            retained="$(find_media_file "$retained_media_dir" "$stream")" || die "Could not find retained $stream media in $retained_media_dir"
+            cmp -s "$media" "$retained" || die "Embedded and retained $stream media differ"
+        fi
+        decode_video "$stream" "$media"
+        frame_counts+=("$stream=$decoded_video_frame_count")
+        signature="$(video_signature "$media")"
+        [[ -n "$signature" ]] || die "ffprobe found no $stream video stream: $media"
+        signatures+=("$stream=$signature")
+        probed_frames="$(video_frame_count "$media")"
+        [[ "$probed_frames" == "$decoded_video_frame_count" ]] || die "$stream FFprobe count differs from complete decode: $probed_frames versus $decoded_video_frame_count"
+        echo "$stream elementary-stream profile (codec,width,height,ffprobe_rate): $signature"
+    done
+    [[ -z "$retained_media_dir" ]] || echo "Embedded video matches retained media sidecars: OK"
     if [[ -e "$requested_profile_manifest" ]]; then
-        verify_requested_profile_manifest "$requested_profile_manifest" "$left_signature" "$right_signature"
+        verify_requested_profile_manifest "$requested_profile_manifest" "${signatures[@]}"
     else
         warn "No requested_profile.json exists; exact requested-versus-recorded profile checks were skipped for this legacy run."
+        if [[ "${video_streams[*]}" == "ColorLeft ColorRight" ]]; then
+            [[ "${signatures[0]#*=}" == "${signatures[1]#*=}" ]] \
+                || die "Stereo media profiles differ: ${signatures[*]}"
+        fi
     fi
-    left_probed_frames="$(video_frame_count "$left")"
-    right_probed_frames="$(video_frame_count "$right")"
-    [[ "$left_probed_frames" == "$left_frames" ]] || die "ColorLeft FFprobe count differs from complete decode: $left_probed_frames versus $left_frames"
-    [[ "$right_probed_frames" == "$right_frames" ]] || die "ColorRight FFprobe count differs from complete decode: $right_probed_frames versus $right_frames"
-    echo "Stereo elementary-stream profile (codec,width,height,ffprobe_rate): $left_signature"
-    echo "Decoded frames: ColorLeft=$left_frames ColorRight=$right_frames"
-    if [[ "$left_frames" != "$right_frames" ]]; then
-        warn "Stereo decoded counts differ at their initial IDR boundaries; per-stream MCAP counts and cadence must still pass."
-    fi
-    verify_mcap_video_timing \
-        "$mcap" "$mode" "$left_frames" "$right_frames" "$requested_profile_manifest"
+    echo "Decoded frames: ${frame_counts[*]}"
+    verify_mcap_video_timing "$mcap" "$mode" "$requested_profile_manifest" "${frame_counts[@]}"
     local wav=""
     if [[ "$mode" == "embedded" ]]; then
         wav="$media_dir/Audio.wav"
@@ -885,8 +894,9 @@ command_verify_impl() {
     if command -v sha256sum >/dev/null 2>&1; then
         # Hash while exported media still exists, and reject read failures.
         print_fingerprint Delivery "$mcap"
-        print_fingerprint ColorLeft "$left"
-        print_fingerprint ColorRight "$right"
+        for stream in "${video_streams[@]}"; do
+            print_fingerprint "$stream" "${media_files[$stream]}"
+        done
         [[ ! -s "$wav" ]] || print_fingerprint Audio "$wav"
     else
         warn "sha256sum is unavailable; media fingerprints were not added to the report."

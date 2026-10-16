@@ -21,7 +21,9 @@ inline void bind_ego_camera(py::module& m)
 
     py::enum_<EgoCameraStream>(m, "EgoCameraStream")
         .value("ColorLeft", EgoCameraStream_ColorLeft)
-        .value("ColorRight", EgoCameraStream_ColorRight);
+        .value("ColorRight", EgoCameraStream_ColorRight)
+        .value("ColorSideLeft", EgoCameraStream_ColorSideLeft)
+        .value("ColorSideRight", EgoCameraStream_ColorSideRight);
 
     py::enum_<EgoPixelFormat>(m, "EgoPixelFormat")
         .value("Mjpg", EgoPixelFormat_Mjpg)

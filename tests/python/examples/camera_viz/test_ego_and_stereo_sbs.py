@@ -336,3 +336,54 @@ def test_sbs_copies_left_then_right_on_the_frame_device_and_stream(monkeypatch):
     assert wrapper.latest() is None
     wrapper.stop()
     assert not source.started
+
+
+@pytest.mark.parametrize(
+    "left,right",
+    [
+        ("ColorSideLeft", "ColorSideRight"),
+        ("ColorRight", "ColorSideLeft"),
+        ("ColorSideRight", "ColorLeft"),
+    ],
+)
+def test_egopro_selects_two_display_streams_without_opening_hardware(left, right):
+    (source,) = build_local_camera(
+        {
+            "name": "egopro",
+            "type": "ego",
+            "stereo": True,
+            "width": 1600,
+            "height": 1200,
+            "left_stream": left,
+            "right_stream": right,
+        }
+    )
+    assert source._left_stream == left
+    assert source._right_stream == right
+    assert source._capture is None
+    assert source.latest() is None
+    assert source.spec.height == 1200
+
+
+@pytest.mark.parametrize(
+    "left,right,match",
+    [
+        ("ColorLeft", "ColorLeft", "different"),
+        ("ColorSideLeft", "ColorSideLeft", "different"),
+        ("ColorLeft", "unknown", "must name"),
+        ("unknown", "ColorRight", "must name"),
+    ],
+)
+def test_ego_preview_rejects_invalid_stream_selection_before_sdk_start(
+    left, right, match
+):
+    with pytest.raises(ValueError, match=match):
+        build_local_camera(
+            {
+                "name": "ego",
+                "type": "ego",
+                "stereo": True,
+                "left_stream": left,
+                "right_stream": right,
+            }
+        )

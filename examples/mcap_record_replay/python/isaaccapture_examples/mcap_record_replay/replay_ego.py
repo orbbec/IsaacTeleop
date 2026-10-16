@@ -22,6 +22,7 @@ from isaaccapture.deviceio_trackers import (
 )
 from isaaccapture.schema import (
     EgoCameraStream,
+    EgoImuSensor,
     EgoSdkReport,
     EgoCaptureSummary,
     EgoRecoveryEvent,
@@ -32,11 +33,16 @@ from mcap.reader import make_reader
 logger = logging.getLogger("isaaccapture.examples.mcap_record_replay.replay_ego")
 
 
-def _update_count(path: Path, topics: set[str]) -> int:
+VIDEO_STREAM_NAMES = ("ColorLeft", "ColorRight", "ColorSideLeft", "ColorSideRight")
+
+
+def _inventory(path: Path) -> Counter[str]:
     with path.open("rb") as stream:
         reader = make_reader(stream)
         summary = reader.get_summary()
         counts: Counter[str] = Counter()
+        if summary is not None:
+            counts.update({channel.topic: 0 for channel in summary.channels.values()})
         if (
             summary is not None
             and summary.statistics is not None
@@ -45,14 +51,11 @@ def _update_count(path: Path, topics: set[str]) -> int:
         ):
             for channel_id, count in summary.statistics.channel_message_counts.items():
                 topic = summary.channels[channel_id].topic
-                if topic in topics:
-                    counts[topic] += count
+                counts[topic] += count
         else:
-            for _, channel, _ in reader.iter_messages(
-                topics=topics, log_time_order=False
-            ):
+            for _, channel, _ in reader.iter_messages(log_time_order=False):
                 counts[channel.topic] += 1
-    return max(counts.values(), default=0)
+    return counts
 
 
 def _diagnostic_policy(path: Path, expected: bool | None) -> bool:
@@ -98,45 +101,58 @@ def replay(
     path: Path, max_updates: int, *, record_device_diagnostics: bool | None = None
 ) -> dict[str, int]:
     diagnostics = _diagnostic_policy(path, record_device_diagnostics)
-    frame_tracker = EgoFrameMetadataTracker(
-        "ego_metadata",
-        [EgoCameraStream.ColorLeft, EgoCameraStream.ColorRight],
+    inventory = _inventory(path)
+    video_names = {
+        topic.removeprefix("ego_metadata/")
+        for topic in inventory
+        if topic.startswith("ego_metadata/")
+    }
+    unknown = video_names - set(VIDEO_STREAM_NAMES)
+    if unknown:
+        raise ValueError(f"Unknown EGO video streams: {sorted(unknown)}")
+    videos = [
+        (name, getattr(EgoCameraStream, name))
+        for name in VIDEO_STREAM_NAMES
+        if name in video_names
+    ]
+    sensors = [
+        (name, getattr(EgoImuSensor, name))
+        for name in ("Accel", "Gyro")
+        if inventory[f"ego_imu/{name}"] > 0
+    ]
+    frame_tracker = (
+        EgoFrameMetadataTracker("ego_metadata", [stream for _, stream in videos])
+        if videos
+        else None
     )
-    imu_tracker = EgoImuTracker("ego_imu")
-    audio_tracker = EgoAudioTracker("ego_audio/Audio")
+    imu_tracker = (
+        EgoImuTracker("ego_imu", [sensor for _, sensor in sensors]) if sensors else None
+    )
+    audio_tracker = (
+        EgoAudioTracker("ego_audio/Audio") if inventory["ego_audio/Audio"] > 0 else None
+    )
     calibration_tracker = EgoCalibrationTracker("ego_calibration/Calibration")
     state_tracker = EgoDeviceStateTracker("ego_device/DeviceState")
-    trackers = [
-        (frame_tracker, "ego_metadata"),
-        (imu_tracker, "ego_imu"),
-        (audio_tracker, "ego_audio"),
-        (calibration_tracker, "ego_calibration"),
-    ]
-    counts = {
-        "ColorLeft": 0,
-        "ColorRight": 0,
-        "Accel": 0,
-        "Gyro": 0,
-        "Audio": 0,
-        "Calibration": 0,
-        "DeviceState": 0,
-    }
-    topics = {
-        "ego_metadata/ColorLeft",
-        "ego_metadata/ColorRight",
-        "ego_imu/Accel",
-        "ego_imu/Gyro",
-        "ego_audio/Audio",
-        "ego_calibration/Calibration",
-        "ego_device/DeviceState",
-    }
+    trackers = [(calibration_tracker, "ego_calibration")]
+    counts = {name: 0 for name, _ in videos + sensors}
+    counts["Calibration"] = 0
+    topics = {"ego_calibration/Calibration"}
+    if frame_tracker is not None:
+        trackers.append((frame_tracker, "ego_metadata"))
+        topics.update(f"ego_metadata/{name}" for name, _ in videos)
+    if imu_tracker is not None:
+        trackers.append((imu_tracker, "ego_imu"))
+        topics.update(f"ego_imu/{name}" for name, _ in sensors)
+    if audio_tracker is not None:
+        trackers.append((audio_tracker, "ego_audio"))
+        counts["Audio"] = 0
+        topics.add("ego_audio/Audio")
     if diagnostics:
         trackers.append((state_tracker, "ego_device"))
-    else:
-        del counts["DeviceState"]
-        topics.remove("ego_device/DeviceState")
+        counts["DeviceState"] = 0
+        topics.add("ego_device/DeviceState")
     # ReplaySession has no EOF accessor; payload-less records also return None.
-    updates = _update_count(path, topics)
+    updates = max((inventory[topic] for topic in topics), default=0)
     if max_updates:
         updates = min(updates, max_updates)
 
@@ -144,9 +160,13 @@ def replay(
         for _ in range(updates):
             session.update()
 
-            for index, name in enumerate(("ColorLeft", "ColorRight")):
+            for index, (name, stream) in enumerate(videos):
                 data = frame_tracker.get_stream_data(session, index)
                 if data is not None:
+                    if data.stream != stream:
+                        raise ValueError(
+                            f"EGO video topic {name} does not match payload stream"
+                        )
                     counts[name] += 1
                     print(
                         f"{name}: epoch={data.capture_epoch} seq={data.sequence_number} "
@@ -154,16 +174,22 @@ def replay(
                         f"format={data.pixel_format} bytes={data.encoded_bytes}"
                     )
 
-            for index, name in enumerate(("Accel", "Gyro")):
+            for index, (name, sensor) in enumerate(sensors):
                 data = imu_tracker.get_stream_data(session, index)
                 if data is not None:
+                    if data.sensor != sensor:
+                        raise ValueError(
+                            f"EGO IMU topic {name} does not match payload sensor"
+                        )
                     counts[name] += 1
                     print(
                         f"{name}: epoch={data.capture_epoch} seq={data.sequence_number} "
                         f"rate_hz={data.sample_rate_hz} samples={len(data.samples)}"
                     )
 
-            audio = audio_tracker.get_data(session)
+            audio = (
+                audio_tracker.get_data(session) if audio_tracker is not None else None
+            )
             if audio is not None:
                 counts["Audio"] += 1
                 print(
@@ -231,7 +257,9 @@ def main() -> int:
         "Replay counts: "
         + ", ".join(f"{name}={count}" for name, count in counts.items())
     )
-    if not all(counts.values()):
+    if not any(name in counts for name in VIDEO_STREAM_NAMES) or not all(
+        counts.values()
+    ):
         missing = ", ".join(name for name, count in counts.items() if count == 0)
         logger.error("Replay incomplete; no records for: %s", missing)
         return 1

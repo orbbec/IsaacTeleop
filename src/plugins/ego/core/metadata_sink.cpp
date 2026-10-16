@@ -136,6 +136,7 @@ std::unique_ptr<FrameSink> create_frame_sink(const std::vector<StreamConfig>& st
 
 std::unique_ptr<FrameSink> create_frame_sink(const std::vector<StreamConfig>& streams, const CaptureConfig& config)
 {
+    validate_capture_streams(streams, config);
     if (!config.collection_prefix.empty() && !config.mcap_filename.empty())
         throw std::invalid_argument("--collection-prefix and --mcap-filename are mutually exclusive");
     if (config.mcap_media_mode == McapMediaMode::Embedded && config.collection_prefix.empty() &&

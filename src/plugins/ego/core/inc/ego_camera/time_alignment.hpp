@@ -6,6 +6,7 @@
 #include <schema/ego_audio_generated.h>
 
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <string>
 
@@ -19,6 +20,14 @@ void validate_time_alignment_profile(const std::string& path);
 std::string loaded_sdk_binary_sha256();
 
 int64_t sdk_timestamp_ns(uint64_t timestamp_us);
+
+struct VideoTimingProfile
+{
+    std::string format;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t fps = 0;
+};
 
 struct TimingIdentity
 {
@@ -35,6 +44,8 @@ struct TimingIdentity
     uint16_t audio_bits = 0;
     bool right_enabled = true;
     std::string sdk_binary_sha256;
+    std::map<std::string, VideoTimingProfile> videos;
+    bool side_capable_device = false;
 };
 
 // The SDK audio path has no physical sample-loss counter. Its retained PCM

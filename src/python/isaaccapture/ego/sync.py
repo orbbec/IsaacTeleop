@@ -6,30 +6,40 @@
 from __future__ import annotations
 
 from bisect import bisect_left, bisect_right
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from fractions import Fraction
 import hashlib
 import json
 import math
 from pathlib import Path
 import re
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from ._records import ByteVector, RecordDecoder
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator
+    from collections.abc import Iterable, Iterator, Mapping
     from typing import Any
 
-STREAMS = ("left_rgb", "right_rgb", "accel", "gyro", "audio")
+VIDEO_STREAMS = ("left_rgb", "right_rgb", "side_left_rgb", "side_right_rgb")
+_LEGACY_STREAMS = ("left_rgb", "right_rgb", "accel", "gyro", "audio")
+STREAMS = (*VIDEO_STREAMS, "accel", "gyro", "audio")
+_VIDEO_NAMES = dict(
+    zip(VIDEO_STREAMS, ("ColorLeft", "ColorRight", "ColorSideLeft", "ColorSideRight"))
+)
 _TOPICS = {
     "ego_metadata/ColorLeft": ("left_rgb", "core.EgoFrameMetadataRecord"),
     "ego_metadata/ColorRight": ("right_rgb", "core.EgoFrameMetadataRecord"),
+    "ego_metadata/ColorSideLeft": ("side_left_rgb", "core.EgoFrameMetadataRecord"),
+    "ego_metadata/ColorSideRight": ("side_right_rgb", "core.EgoFrameMetadataRecord"),
     "ego_imu/Accel": ("accel", "core.EgoImuBatchRecord"),
     "ego_imu/Gyro": ("gyro", "core.EgoImuBatchRecord"),
     "ego_audio/Audio": ("audio", "core.EgoAudioChunkRecord"),
     "ego_media/ColorLeft": ("left_rgb", "core.EgoEncodedVideoFrameRecord"),
     "ego_media/ColorRight": ("right_rgb", "core.EgoEncodedVideoFrameRecord"),
+    "ego_media/ColorSideLeft": ("side_left_rgb", "core.EgoEncodedVideoFrameRecord"),
+    "ego_media/ColorSideRight": ("side_right_rgb", "core.EgoEncodedVideoFrameRecord"),
     "ego_media/Audio": ("audio", "core.EgoPcmAudioChunkRecord"),
     "ego_calibration/Calibration": ("calibration", "core.EgoCalibrationRecord"),
 }
@@ -116,6 +126,23 @@ class SyncWindow:
     audio: tuple[AudioSlice, ...]
     complete: bool
     reasons: tuple[str, ...]
+    videos: Mapping[str, VideoFrame | None] = field(default_factory=dict)
+
+    def __post_init__(self):
+        frames = {"left_rgb": self.left_rgb, "right_rgb": self.right_rgb}
+        for stream, frame in self.videos.items():
+            if stream not in VIDEO_STREAMS or (
+                frame is not None and frame.stream != stream
+            ):
+                raise ValueError(
+                    "videos must map known video streams to matching frames"
+                )
+            if frames.get(stream) is not None and frames[stream] != frame:
+                raise ValueError(f"videos disagrees with {stream}")
+            frames[stream] = frame
+        object.__setattr__(self, "left_rgb", frames["left_rgb"])
+        object.__setattr__(self, "right_rgb", frames["right_rgb"])
+        object.__setattr__(self, "videos", MappingProxyType(frames))
 
 
 def _sha256(path):
@@ -190,6 +217,8 @@ def _load(recording):
             expected_sensor = {
                 "left_rgb": 0,
                 "right_rgb": 1,
+                "side_left_rgb": 2,
+                "side_right_rgb": 3,
                 "accel": 0,
                 "gyro": 1,
             }.get(stream)
@@ -279,13 +308,9 @@ def _load(recording):
                         "Embedded media and metadata have different sample timestamps"
                     )
                 item["media"] = embedded["media"]
-            elif stream in ("left_rgb", "right_rgb"):
+            elif stream in VIDEO_STREAMS:
                 extension = _format(data["pixel_format"])
-                media_path = (
-                    path.parent
-                    / "raw"
-                    / f"{'ColorLeft' if stream == 'left_rgb' else 'ColorRight'}.{extension}"
-                )
+                media_path = path.parent / "raw" / f"{_VIDEO_NAMES[stream]}.{extension}"
                 size = data["encoded_bytes"]
                 if (
                     media_path.is_file()
@@ -346,7 +371,7 @@ def _load(recording):
                 f"{stream}: {raw_regressions} nonmonotonic raw sample timestamps within an epoch",
                 (stream,),
             )
-        if stream in ("left_rgb", "right_rgb") and records[stream]:
+        if stream in VIDEO_STREAMS and records[stream]:
             refs = [
                 item["media"]
                 for item in records[stream]
@@ -434,10 +459,10 @@ def _positive(value, name):
 
 
 def _required(required_streams, reference_stream, default=False):
-    if reference_stream not in ("left_rgb", "right_rgb"):
-        raise ValueError("reference_stream must be left_rgb or right_rgb")
+    if reference_stream not in VIDEO_STREAMS:
+        raise ValueError("reference_stream must name a known RGB stream")
     if required_streams is None and default:
-        return STREAMS
+        required_streams = _LEGACY_STREAMS
     if isinstance(required_streams, str) or not required_streams:
         raise ValueError("required_streams must be an explicit nonempty collection")
     values = tuple(dict.fromkeys(required_streams))
@@ -458,6 +483,10 @@ def _profile_model(loaded, required, reference):
     if not snapshots:
         return None
     profile = snapshots[-1]["capture_profile"]
+    if any(loaded["records"][stream] for stream in VIDEO_STREAMS[2:]):
+        raise ValueError(
+            "Stereo capture profiles cannot be applied to a four-camera recording; a validated v2 recording model is required"
+        )
     if any(value["capture_profile"] != profile for value in snapshots):
         raise ValueError("Conflicting embedded capture profiles")
     if (
@@ -612,19 +641,44 @@ def _select_model(loaded, alignment, required, reference):
     return alignment, external
 
 
+def _video_profile(model, stream):
+    profile = model.get("profile", {})
+    return (
+        profile.get("videos", {}).get(stream)
+        if model.get("version") == 2
+        else profile.get("video")
+    )
+
+
 def _validate_model(loaded, model, external, required, reference):
-    # The selectable window camera does not change the model's left-camera clock.
+    # Selecting the window camera does not change the model's reference clock.
     if not isinstance(model, dict) or model.get("status") != "validated":
         raise ValueError("A validated recording-specific alignment model is required")
     if (
-        model.get("version") != 1
+        model.get("version") not in (1, 2)
         or model.get("scope") != "recording"
-        or model.get("reference_stream") != "left_rgb"
+        or model.get("reference_stream") not in VIDEO_STREAMS
+        or (model.get("version") == 1 and model.get("reference_stream") != "left_rgb")
         or not model.get("model_id")
     ):
         raise ValueError(
             "Invalid alignment version, scope, reference stream, or model_id"
         )
+    active_videos = {stream for stream in VIDEO_STREAMS if loaded["records"][stream]}
+    if model["version"] == 1 and active_videos.intersection(VIDEO_STREAMS[2:]):
+        raise ValueError(
+            "Stereo v1 alignment cannot be applied to a four-camera recording; use a validated v2 recording model"
+        )
+    if model["version"] == 2:
+        videos = model.get("profile", {}).get("videos")
+        if (
+            not isinstance(videos, dict)
+            or set(videos) != active_videos
+            or model["reference_stream"] not in videos
+        ):
+            raise ValueError(
+                "Alignment profile.videos must match the recorded camera set and include its reference"
+            )
     issues = [
         message
         for message, streams in loaded["scoped_issues"]
@@ -661,7 +715,7 @@ def _validate_model(loaded, model, external, required, reference):
                     "format": _format(data["pixel_format"]),
                     **{key: data[key] for key in ("width", "height", "fps")},
                 }
-                if actual != profile.get("video"):
+                if actual != _video_profile(model, stream):
                     raise ValueError(f"Alignment video profile mismatch on {stream}")
             elif stream in ("accel", "gyro") and data["sample_rate_hz"] != profile.get(
                 "imu_rate_hz"
@@ -683,7 +737,11 @@ def _validate_model(loaded, model, external, required, reference):
         "held_out_duration_ns",
         900_000_000_000,
     )
-    fps = _positive(profile.get("video", {}).get("fps"), "fps")
+    fps = max(
+        _positive((_video_profile(model, stream) or {}).get("fps"), "fps")
+        for stream in required
+        if stream in VIDEO_STREAMS
+    )
     if error + uncertainty > 500_000_000 / fps:
         raise ValueError("Independent validation exceeds the half-frame error budget")
     evidence = validation.get("evidence")
@@ -709,6 +767,8 @@ def _validate_model(loaded, model, external, required, reference):
             )
         ranges.setdefault(epoch, []).append((lo, hi))
         maps = segment.get("streams", {})
+        if model["version"] == 2 and model["reference_stream"] not in maps:
+            raise ValueError("Alignment is missing its reference stream clock")
         for stream in required:
             if stream not in maps:
                 raise ValueError(f"Alignment is missing required stream {stream}")
@@ -983,27 +1043,30 @@ def _windows(loaded, model, required, reference, epoch, start, end):
                 reasons.append("reference_gap")
             if (start is not None and lo < start) or (end is not None and hi > end):
                 continue
-            frames = {"left_rgb": None, "right_rgb": None, reference: current}
-            other = "right_rgb" if reference == "left_rgb" else "left_rgb"
-            # SDK eye sequence counters can start one cycle apart; corrected
-            # sample times define stereo correspondence, not equal sequence IDs.
-            position = bisect_left(times[other], lo)
-            candidates = [
-                values[other][index]
-                for index in (position - 1, position)
-                if 0 <= index < len(values[other])
-            ]
-            candidates = [
-                value
-                for value in candidates
-                if abs(value.time_ns - lo) <= 2_000_000
-                and (other, value.record.epoch, value.record.record_index)
-                not in used_video
-            ]
-            if candidates:
-                pair = min(candidates, key=lambda value: abs(value.time_ns - lo))
-                frames[other] = pair
-                used_video.add((other, pair.record.epoch, pair.record.record_index))
+            frames = dict.fromkeys(VIDEO_STREAMS)
+            frames[reference] = current
+            # SDK sequence origins may differ; calibrated sample times define
+            # correspondence for every selected camera.
+            for other in VIDEO_STREAMS:
+                if other == reference or other not in required:
+                    continue
+                position = bisect_left(times[other], lo)
+                candidates = [
+                    values[other][index]
+                    for index in (position - 1, position)
+                    if 0 <= index < len(values[other])
+                ]
+                candidates = [
+                    value
+                    for value in candidates
+                    if abs(value.time_ns - lo) <= 2_000_000
+                    and (other, value.record.epoch, value.record.record_index)
+                    not in used_video
+                ]
+                if candidates:
+                    pair = min(candidates, key=lambda value: abs(value.time_ns - lo))
+                    frames[other] = pair
+                    used_video.add((other, pair.record.epoch, pair.record.record_index))
             samples = {}
             for stream in ("accel", "gyro"):
                 a, b = bisect_left(times[stream], lo), bisect_left(times[stream], hi)
@@ -1086,6 +1149,7 @@ def _windows(loaded, model, required, reference, epoch, start, end):
                 audio,
                 not reasons,
                 tuple(reasons),
+                frames,
             )
 
 
@@ -1196,6 +1260,10 @@ def _window_index(window):
     for stream in ("left_rgb", "right_rgb"):
         frame = getattr(window, stream)
         result[stream] = asdict(frame) if frame else None
+    result["videos"] = {
+        stream: asdict(frame) if frame else None
+        for stream, frame in window.videos.items()
+    }
     result["accel"] = _sample_ranges(window.accel)
     result["gyro"] = _sample_ranges(window.gyro)
     result["audio"] = [asdict(value) for value in window.audio]
@@ -1292,14 +1360,14 @@ def analyze_recording_sync(
             "epochs": epochs,
             "sequence_gaps": sequence_gaps,
             "missing_media_records": sum(item["media"] is None for item in selected)
-            if stream in ("left_rgb", "right_rgb", "audio")
+            if stream in (*VIDEO_STREAMS, "audio")
             else 0,
         }
     model = None
     errors = []
     windows = []
     complete_windows = 0
-    assigned = {stream: set() for stream in ("left_rgb", "right_rgb")}
+    assigned = {stream: set() for stream in VIDEO_STREAMS}
     assigned.update({stream: {} for stream in ("accel", "gyro")})
     assigned_audio = {}
     status = "unverified"
@@ -1323,8 +1391,7 @@ def analyze_recording_sync(
             ):
                 windows.append(_window_index(window))
                 complete_windows += window.complete
-                for stream in ("left_rgb", "right_rgb"):
-                    frame = getattr(window, stream)
+                for stream, frame in window.videos.items():
                     if frame:
                         assigned[stream].add(
                             (frame.record.epoch, frame.record.record_index)
@@ -1355,9 +1422,7 @@ def analyze_recording_sync(
         for ranges in assigned_audio.values()
         for lo, hi in _merge_ranges(ranges)
     )
-    assigned_counts = {
-        stream: len(assigned[stream]) for stream in ("left_rgb", "right_rgb")
-    }
+    assigned_counts = {stream: len(assigned[stream]) for stream in VIDEO_STREAMS}
     assigned_counts.update(
         {
             stream: sum(
@@ -1384,7 +1449,7 @@ def analyze_recording_sync(
             if (epoch is None or item["ref"].epoch == epoch)
             and (item["ref"].epoch, item["ref"].record_index) not in assigned[stream]
         ]
-        for stream in ("left_rgb", "right_rgb")
+        for stream in VIDEO_STREAMS
     }
     return {
         "version": 1,
@@ -1403,7 +1468,10 @@ def analyze_recording_sync(
         "windows": windows,
         "association_format": "record_and_sample_ranges_v1",
         "five_stream_verified": status == "validated"
-        and set(required) == set(STREAMS)
+        and set(required) == set(_LEGACY_STREAMS)
+        and bool(windows)
+        and complete_windows == len(windows),
+        "selected_streams_verified": status == "validated"
         and bool(windows)
         and complete_windows == len(windows),
         "verification_scope": "returned_windows",

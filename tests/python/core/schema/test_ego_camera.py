@@ -13,6 +13,7 @@ from isaaccapture.schema import (
     EgoAudioChunkRecord,
     EgoCalibration,
     EgoCalibrationRecord,
+    EgoVideoCalibration,
     EgoCameraIntrinsics,
     EgoCameraStream,
     EgoCaptureHealth,
@@ -37,6 +38,28 @@ from isaaccapture.schema import (
     EgoPcmAudioChunkRecord,
     EgoPixelFormat,
 )
+
+
+def test_quad_calibration_retains_optional_data_and_old_constructor():
+    assert int(EgoCameraStream.ColorLeft) == 0
+    assert int(EgoCameraStream.ColorRight) == 1
+    assert EgoCalibration("stereo").video_streams == []
+    entry = EgoVideoCalibration(
+        stream=EgoCameraStream.ColorSideRight,
+        intrinsics=EgoCameraIntrinsics(width=1600, height=1200, fx=800),
+        intrinsics_source="sdk_stream_profile",
+        extrinsics_source="unavailable",
+        extrinsics_error="no extrinsics path",
+    )
+    calibration = EgoCalibration(video_streams=[entry])
+    retained = calibration.video_streams[0]
+    del calibration, entry
+    gc.collect()
+    assert retained.stream == EgoCameraStream.ColorSideRight
+    assert retained.intrinsics.height == 1200
+    assert retained.to_reference is None
+    assert retained.extrinsics_error == "no extrinsics path"
+    assert EgoVideoCalibration().intrinsics is None
 
 
 def test_camera_payload_and_retained_record_views():

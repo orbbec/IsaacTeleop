@@ -325,3 +325,67 @@ def test_recording_model_cannot_extend_beyond_independent_evidence(
                 }
             ],
         )
+
+
+def test_quad_recording_model_uses_per_camera_profiles_and_measured_clocks(tmp_path):
+    recording = tmp_path / "quad.mcap"
+    recording.write_bytes(b"quad-recording")
+    streams = ("left_rgb", "right_rgb", "side_left_rgb", "side_right_rgb")
+    result = make_recording_alignment(
+        recording,
+        model_id="quad-physical-events",
+        identity={"serial": "quad", "firmware": "1", "sdk_version": "2.9"},
+        profile={
+            "videos": {
+                stream: {"format": "h264", "width": 1600, "height": 1200, "fps": 30}
+                for stream in streams
+            }
+        },
+        reference_stream="side_left_rgb",
+        epochs=[
+            {
+                "epoch": 0,
+                "valid_from_ns": ORIGIN,
+                "valid_to_ns": ORIGIN + VALIDATION_DURATION_NS,
+                "streams": {
+                    stream: fit_raw() for stream in streams if stream != "side_left_rgb"
+                },
+            }
+        ],
+    )
+    assert result["version"] == 2
+    assert result["status"] == "validated"
+    assert result["reference_stream"] == "side_left_rgb"
+    assert set(result["epochs"][0]["streams"]) == set(streams)
+    assert result["epochs"][0]["streams"]["side_left_rgb"]["scale"] == 1.0
+    json.dumps(result, allow_nan=False)
+
+
+def test_quad_recording_model_does_not_invent_an_unmeasured_camera_clock(tmp_path):
+    recording = tmp_path / "quad.mcap"
+    recording.write_bytes(b"quad-recording")
+    with pytest.raises(ValueError, match="Every nonreference camera"):
+        make_recording_alignment(
+            recording,
+            model_id="incomplete-model",
+            identity={"serial": "quad", "firmware": "1", "sdk_version": "2.9"},
+            profile={
+                "videos": {
+                    stream: {"format": "h264", "width": 1600, "height": 1200, "fps": 30}
+                    for stream in (
+                        "left_rgb",
+                        "right_rgb",
+                        "side_left_rgb",
+                        "side_right_rgb",
+                    )
+                }
+            },
+            epochs=[
+                {
+                    "epoch": 0,
+                    "valid_from_ns": ORIGIN,
+                    "valid_to_ns": ORIGIN + VALIDATION_DURATION_NS,
+                    "streams": {"right_rgb": fit_raw()},
+                }
+            ],
+        )

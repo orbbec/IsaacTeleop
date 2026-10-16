@@ -20,6 +20,25 @@ namespace py = pybind11;
 namespace
 {
 
+struct VideoSelection
+{
+    OBSensorType sensor;
+    OBFrameType frame;
+};
+
+VideoSelection video_from_name(const std::string& name)
+{
+    if (name == "ColorLeft")
+        return { OB_SENSOR_COLOR_LEFT, OB_FRAME_COLOR_LEFT };
+    if (name == "ColorRight")
+        return { OB_SENSOR_COLOR_RIGHT, OB_FRAME_COLOR_RIGHT };
+    if (name == "ColorSideLeft")
+        return { OB_SENSOR_COLOR_SIDE_LEFT, OB_FRAME_COLOR_SIDE_LEFT };
+    if (name == "ColorSideRight")
+        return { OB_SENSOR_COLOR_SIDE_RIGHT, OB_FRAME_COLOR_SIDE_RIGHT };
+    throw std::invalid_argument("stream must be ColorLeft, ColorRight, ColorSideLeft, or ColorSideRight");
+}
+
 OBFormat format_from_name(const std::string& name)
 {
     if (name == "mjpg" || name == "mjpeg")
@@ -40,9 +59,22 @@ int64_t monotonic_ns()
 class Capture
 {
 public:
-    Capture(std::string uid, uint32_t width, uint32_t height, uint32_t fps, std::string format)
-        : width_(width), height_(height), format_(format_from_name(format))
+    Capture(std::string uid,
+            uint32_t width,
+            uint32_t height,
+            uint32_t fps,
+            std::string format,
+            std::string left_stream,
+            std::string right_stream)
+        : width_(width),
+          height_(height),
+          format_(format_from_name(format)),
+          left_stream_(video_from_name(left_stream)),
+          right_stream_(video_from_name(right_stream))
     {
+        if (left_stream_.sensor == right_stream_.sensor)
+            throw std::invalid_argument("left_stream and right_stream must select different streams");
+        context_ = std::make_unique<ob::Context>();
 #if defined(__linux__) || defined(__ANDROID__)
         context_->setUvcBackendType(OB_UVC_BACKEND_TYPE_LIBUVC);
 #endif
@@ -61,10 +93,10 @@ public:
             throw std::runtime_error("EGO not found");
         pipeline_ = std::make_unique<ob::Pipeline>(device_);
         auto config = std::make_shared<ob::Config>();
-        config->enableStream(device_->getSensor(OB_SENSOR_COLOR_LEFT)
+        config->enableStream(device_->getSensor(left_stream_.sensor)
                                  ->getStreamProfileList()
                                  ->getVideoStreamProfile(width, height, format_, fps));
-        config->enableStream(device_->getSensor(OB_SENSOR_COLOR_RIGHT)
+        config->enableStream(device_->getSensor(right_stream_.sensor)
                                  ->getStreamProfileList()
                                  ->getVideoStreamProfile(width, height, format_, fps));
         pipeline_->start(config);
@@ -117,8 +149,8 @@ public:
         }
         if (!frame_set)
             return no_pair();
-        const auto left_raw = frame_set->getFrame(OB_FRAME_COLOR_LEFT);
-        const auto right_raw = frame_set->getFrame(OB_FRAME_COLOR_RIGHT);
+        const auto left_raw = frame_set->getFrame(left_stream_.frame);
+        const auto right_raw = frame_set->getFrame(right_stream_.frame);
         if (!left_raw || !right_raw)
             return no_pair();
         const auto left = left_raw->as<ob::VideoFrame>();
@@ -128,8 +160,8 @@ public:
         // Match the eyes on raw device time before conversion or payload copies.
         if (std::llabs(left_ts - right_ts) > 2'000'000)
             return no_pair();
-        const auto left_bytes = bytes(left);
-        const auto right_bytes = bytes(right);
+        const auto left_bytes = bytes(left, left_converter_);
+        const auto right_bytes = bytes(right, right_converter_);
         if (left_bytes.is_none() || right_bytes.is_none())
             return no_pair();
         py::dict result;
@@ -168,12 +200,12 @@ private:
         return py::none();
     }
 
-    py::object bytes(const std::shared_ptr<ob::VideoFrame>& frame)
+    py::object bytes(const std::shared_ptr<ob::VideoFrame>& frame,
+                     const std::unique_ptr<ob::FormatConvertFilter>& converter)
     {
         std::shared_ptr<ob::VideoFrame> output = frame;
         if (format_ == OB_FORMAT_MJPG)
         {
-            auto& converter = frame->getType() == OB_FRAME_COLOR_LEFT ? left_converter_ : right_converter_;
             std::shared_ptr<ob::Frame> converted;
             {
                 py::gil_scoped_release release;
@@ -191,7 +223,7 @@ private:
         return py::bytes(reinterpret_cast<const char*>(output->getData()), output->getDataSize());
     }
 
-    std::unique_ptr<ob::Context> context_ = std::make_unique<ob::Context>();
+    std::unique_ptr<ob::Context> context_;
     std::shared_ptr<ob::Device> device_;
     std::unique_ptr<ob::Pipeline> pipeline_;
     std::unique_ptr<ob::FormatConvertFilter> left_converter_;
@@ -202,6 +234,8 @@ private:
     uint32_t width_;
     uint32_t height_;
     OBFormat format_;
+    VideoSelection left_stream_;
+    VideoSelection right_stream_;
 };
 
 } // namespace
@@ -210,8 +244,9 @@ PYBIND11_MODULE(_ego_capture, module)
 {
     module.doc() = "Native EGO stereo capture for camera_viz";
     py::class_<Capture>(module, "Capture")
-        .def(py::init<std::string, uint32_t, uint32_t, uint32_t, std::string>(), py::arg("device_uid") = "",
-             py::arg("width") = 1600, py::arg("height") = 1300, py::arg("fps") = 30, py::arg("format") = "h264",
+        .def(py::init<std::string, uint32_t, uint32_t, uint32_t, std::string, std::string, std::string>(),
+             py::arg("device_uid") = "", py::arg("width") = 1600, py::arg("height") = 1300, py::arg("fps") = 30,
+             py::arg("format") = "h264", py::arg("left_stream") = "ColorLeft", py::arg("right_stream") = "ColorRight",
              py::call_guard<py::gil_scoped_release>())
         // SDK shutdown must not prevent the consumer thread from joining.
         .def("close", &Capture::close, py::call_guard<py::gil_scoped_release>())

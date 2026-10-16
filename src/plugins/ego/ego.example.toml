@@ -5,7 +5,8 @@
 # Omit duration for an unlimited recording stopped with Ctrl-C.
 duration = 30
 
-# Stereo ColorLeft and ColorRight are both required by this workflow.
+# Quad selects all four RGB streams; use height=1200 for H264 1600x1200@30.
+streams = "stereo"
 format = "h264"
 width = 1600
 height = 1300

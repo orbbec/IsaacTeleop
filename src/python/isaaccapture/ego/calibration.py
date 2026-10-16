@@ -212,6 +212,7 @@ def make_recording_alignment(
     profile: Mapping,
     epochs: Sequence[Mapping],
     media_paths: Sequence[str | Path] = (),
+    reference_stream: str = "left_rgb",
 ) -> dict:
     """Build an explicit MCAP-bound model; each nonreference stream needs a fit."""
     path = Path(recording).resolve(strict=True)
@@ -222,14 +223,44 @@ def make_recording_alignment(
     for field in ("serial", "firmware", "sdk_version"):
         if not isinstance(identity.get(field), str) or not identity[field].strip():
             raise ValueError(f"Missing identity.{field}")
-    fps = profile.get("video", {}).get("fps")
+    from .sync import VIDEO_STREAMS
+
+    videos = profile.get("videos")
+    version = 1 if videos is None else 2
+    if version == 1:
+        if reference_stream != "left_rgb":
+            raise ValueError("v1 recording models require left_rgb as reference")
+        fps = profile.get("video", {}).get("fps")
+    else:
+        if (
+            not isinstance(videos, Mapping)
+            or not videos
+            or any(stream not in VIDEO_STREAMS for stream in videos)
+            or reference_stream not in videos
+        ):
+            raise ValueError(
+                "profile.videos must name known camera streams including reference_stream"
+            )
+        for video in videos.values():
+            if (
+                not isinstance(video, Mapping)
+                or video.get("format") not in ("mjpg", "h264", "h265")
+                or any(
+                    type(video.get(name)) is not int or video[name] <= 0
+                    for name in ("width", "height", "fps")
+                )
+            ):
+                raise ValueError(
+                    "Each video profile needs a supported format and positive width, height, fps"
+                )
+        fps = max(video["fps"] for video in videos.values())
     if type(fps) not in (int, float) or not math.isfinite(fps) or fps <= 0:
         raise ValueError("profile.video.fps must be finite and positive")
     document = {
-        "version": 1,
+        "version": version,
         "scope": "recording",
         "status": "validated",
-        "reference_stream": "left_rgb",
+        "reference_stream": reference_stream,
         "model_id": model_id,
         "identity": dict(identity),
         "profile": dict(profile),
@@ -265,15 +296,17 @@ def make_recording_alignment(
             raise ValueError("Invalid epoch or effective interval")
         ranges.setdefault(epoch, []).append((begin, end))
         streams = {
-            "left_rgb": {
+            reference_stream: {
                 "source_anchor_ns": begin,
                 "reference_anchor_ns": begin,
                 "scale": 1.0,
             }
         }
         for name, fit in value["streams"].items():
-            if name == "left_rgb":
-                raise ValueError("left_rgb defines the reference and is not fitted")
+            if name == reference_stream:
+                raise ValueError(
+                    f"{reference_stream} defines the reference and is not fitted"
+                )
             if name == "audio":
                 segments = []
                 seen = set()
@@ -326,7 +359,8 @@ def make_recording_alignment(
                     )
                 streams[name] = {"segments": segments}
             else:
-                if name not in ("right_rgb", "accel", "gyro") or not isinstance(
+                allowed_videos = set(videos) if version == 2 else {"right_rgb"}
+                if name not in (*allowed_videos, "accel", "gyro") or not isinstance(
                     fit, TimeAlignmentFit
                 ):
                     raise ValueError("Unsupported stream or missing fitted clock")
@@ -351,6 +385,8 @@ def make_recording_alignment(
                         **fit.validation_report(),
                     }
                 )
+        if version == 2 and not set(videos).issubset(streams):
+            raise ValueError("Every nonreference camera requires its own fitted clock")
         document["epochs"].append(
             {
                 "epoch": epoch,

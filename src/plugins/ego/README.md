@@ -5,8 +5,8 @@ SPDX-License-Identifier: Apache-2.0
 
 # EGO Camera Plugin
 
-C++ plugin that records EGO ColorLeft and ColorRight video and optionally captures
-IMU, audio, calibration, and device diagnostics in Isaac Capture.
+C++ plugin that records EGO stereo or EGOPRO four-camera RGB video and optionally
+captures IMU, audio, calibration, and device diagnostics in Isaac Capture.
 
 The examples below use the native `ego_camera_plugin` executable. The optional
 `ego.sh` helper provides a quick way to build, record, and verify a dataset.
@@ -127,7 +127,59 @@ from a selected device with an advertised H.265 profile:
 ```
 
 Use `format=mjpg` with a `.mjpg` output for MJPEG. The native executable permits
-one or both eyes; it never adds a second stream implicitly.
+any explicitly selected supported RGB streams; it never adds streams implicitly.
+
+### Record EGOPRO Four-Camera RGB
+
+The same `ego_camera_plugin` entry point supports both devices. Existing stereo
+defaults remain `ColorLeft`/`ColorRight`, H.264 `1600x1300@30` in the wrapper.
+Select four cameras explicitly for EGOPRO:
+
+```bash
+./src/plugins/ego/ego.sh record --plugin "$EGO_PLUGIN" \
+  --streams quad --duration 15 --output recordings/egopro_quad \
+  --mcap-media embedded --keep-media-sidecars
+```
+
+The quad preset requests H.264 `1600x1200@30`. It uses the same capture queues,
+reconnect, diagnostics, MCAP writer and shutdown lifecycle as stereo. Each
+stream must be advertised and deliver data; unsupported requests fail without
+substituting another stream or profile. IMU is requested when available; use
+`--no-imu` for RGB-only capture. Audio remains opt-in.
+When multiple cameras are connected, pass `--device-uid UID` from the capability
+listing to select the intended device explicitly.
+
+| SDK / CLI stream | Offline stream name | MCAP metadata topic |
+|---|---|---|
+| `ColorLeft` | `left_rgb` | `ego_metadata/ColorLeft` |
+| `ColorRight` | `right_rgb` | `ego_metadata/ColorRight` |
+| `ColorSideLeft` | `side_left_rgb` | `ego_metadata/ColorSideLeft` |
+| `ColorSideRight` | `side_right_rgb` | `ego_metadata/ColorSideRight` |
+
+Native callers repeat `--add-stream=camera=NAME,format=h264` for the four names
+with `--width=1600 --height=1200 --fps=30` and an embedded MCAP destination.
+Use each stream's `output=` with sidecar recording. Export and verification
+tools handle all recorded RGB channels. The structured replay example discovers
+the recorded camera channels and adds IMU/audio trackers only when present.
+
+Stream names identify SDK channels, not independently verified physical lens
+positions or stereo pairs. Timestamp proximity alone does not establish exposure
+synchronization. The plugin's SDL `--preview` remains stereo-only and rejects
+side-camera requests. The independent GPU EGO viewer can select a pair; a four-view
+grid and physical stereo calibration are separate work.
+
+Calibration appends optional `video_streams` entries with per-stream intrinsics,
+transforms **from each stream to the named reference**, source and error fields.
+Translations use millimetres. Unavailable values remain null; the reference
+entry has `extrinsics_source="reference_stream"`. The stereo fields and field IDs
+remain unchanged. EGOPRO never uses the legacy two-camera YAML positional parser.
+
+EGOPRO timing provenance uses version 2 with `profile.videos` containing the
+actual profile of each active video stream. Without independent timing
+validation it stays `unverified`, preserves raw SDK timestamps and uses host
+arrival for local sample time. Stereo version-1 capture profiles are rejected
+on a side-camera-capable device. Offline version-2 recording-bound timing models
+are supported; reusable version-2 capture profiles are not yet supported.
 
 ### Optional IMU and Preview
 
@@ -325,7 +377,7 @@ These entries describe the native executable, not wrapper presets:
 
 | Option | Native default | Purpose |
 |---|---|---|
-| `--add-stream=camera=...,output=...[,format=...,width=...,height=...,fps=...]` | None; at least one required | Select `ColorLeft` or `ColorRight`. Format defaults to `mjpg`; output is required unless embedded media has no sidecars. |
+| `--add-stream=camera=...,output=...[,format=...,width=...,height=...,fps=...]` | None; at least one required | Select an advertised `ColorLeft`, `ColorRight`, `ColorSideLeft` or `ColorSideRight`. Format defaults to `mjpg`; output is required unless embedded media has no sidecars. |
 | `--width=N --height=N --fps=N` | `0` | Global profile fields; zero selects an SDK default. Nonzero stream fields take precedence. |
 | `--device-uid=UID` | Automatic selection | Select a device reported by `--list-capabilities`. |
 | `--enable-imu --imu-rate=400\|1000` | Off; rate `400` | Enable available IMU. Setting rate alone does not enable it. |
@@ -431,8 +483,9 @@ python3 -m pip install --user mcap  # If the MCAP reader is not installed.
 ```
 
 Omit `--expect-imu` if IMU was not requested; add `--expect-audio` when audio was
-requested. This verifier expects `metadata.mcap` and two video streams; it is
-not a verifier for raw-only or single-eye capture. Native recording does not
+requested. This verifier expects `metadata.mcap` and discovers recorded RGB
+streams, or checks the wrapper's requested stream inventory. It does not verify
+raw-only capture. Native recording does not
 create `requested_profile.json` or `logs/capture.log`: without those files,
 request matching or log-based loss checks are skipped with a warning.
 Success prints `Verification passed` and writes `verification_report.txt`;
@@ -448,8 +501,9 @@ directory because the exporter overwrites same-name media files:
 "$EGO_BIN/ego_mcap_export_media" "$RUN/metadata.mcap" "$RUN/exported_media"
 ```
 
-It writes `ColorLeft.<format>`, `ColorRight.<format>`, and `Audio.wav` when PCM
-was recorded. Do not export a `.partial` capture as a completed dataset.
+It writes one file per recorded camera, including `ColorSideLeft.<format>` and
+`ColorSideRight.<format>` for quad capture, and `Audio.wav` when PCM was recorded.
+Do not export a `.partial` capture as a completed dataset.
 
 Elementary streams are not MP4 files. To play or remux H.264 sidecars:
 
@@ -472,9 +526,9 @@ python -m isaaccapture_examples.mcap_record_replay.replay_ego \
   /absolute/path/to/audio_enabled_recording/metadata.mcap
 ```
 
-This example requires RGB, IMU, Audio, calibration, and enabled diagnostic
-channels. A missing Audio channel is expected for audio-disabled recordings;
-it does not make them invalid. Replay reads structured records, not decoded
+This example discovers RGB and available IMU, Audio, calibration and diagnostic
+channels. Audio-disabled and four-camera recordings are supported.
+Replay reads structured records, not decoded
 video or synchronized sound, and one update is not a synchronized bundle.
 
 For sample-time association, install the offline extra and select only the

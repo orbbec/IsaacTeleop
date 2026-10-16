@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <variant>
 #include <vector>
@@ -232,6 +233,50 @@ inline void bind_ego(py::module& m)
              py::arg("json") = std::string{})
         .def_property_readonly("json", string_field(&EgoTimeAlignment::json));
 
+    serialized_class<EgoVideoCalibration>(m, "EgoVideoCalibration", "Per-video calibration and availability.")
+        .def(py::init(
+                 [](EgoCameraStream stream, const Serialized<EgoCameraIntrinsics>* intrinsics,
+                    const Serialized<EgoExtrinsics>* to_reference, EgoCameraStream reference_stream,
+                    const std::string& intrinsics_source, const std::string& extrinsics_source,
+                    const std::string& intrinsics_error, const std::string& extrinsics_error)
+                 {
+                     EgoVideoCalibrationT native;
+                     native.stream = stream;
+                     native.reference_stream = reference_stream;
+                     if (intrinsics && *intrinsics)
+                     {
+                         native.intrinsics = std::make_shared<EgoCameraIntrinsicsT>();
+                         (*intrinsics)->UnPackTo(native.intrinsics.get());
+                     }
+                     if (to_reference && *to_reference)
+                     {
+                         native.to_reference = std::make_shared<EgoExtrinsicsT>();
+                         (*to_reference)->UnPackTo(native.to_reference.get());
+                     }
+                     native.intrinsics_source = intrinsics_source;
+                     native.extrinsics_source = extrinsics_source;
+                     native.intrinsics_error = intrinsics_error;
+                     native.extrinsics_error = extrinsics_error;
+                     return pack<EgoVideoCalibration>(native);
+                 }),
+             py::arg("stream") = EgoCameraStream_ColorLeft, py::arg("intrinsics") = nullptr,
+             py::arg("to_reference") = nullptr, py::arg("reference_stream") = EgoCameraStream_ColorLeft,
+             py::arg("intrinsics_source") = std::string{}, py::arg("extrinsics_source") = std::string{},
+             py::arg("intrinsics_error") = std::string{}, py::arg("extrinsics_error") = std::string{})
+        .def_property_readonly("stream", field(&EgoVideoCalibration::stream))
+        .def_property_readonly("reference_stream", field(&EgoVideoCalibration::reference_stream))
+        .def_property_readonly("intrinsics",
+                               [](const Serialized<EgoVideoCalibration>& self) -> py::object
+                               { return self->intrinsics() ? py::cast(self.narrow(self->intrinsics())) : py::none(); })
+        .def_property_readonly(
+            "to_reference",
+            [](const Serialized<EgoVideoCalibration>& self) -> py::object
+            { return self->to_reference() ? py::cast(self.narrow(self->to_reference())) : py::none(); })
+        .def_property_readonly("intrinsics_source", string_field(&EgoVideoCalibration::intrinsics_source))
+        .def_property_readonly("extrinsics_source", string_field(&EgoVideoCalibration::extrinsics_source))
+        .def_property_readonly("intrinsics_error", string_field(&EgoVideoCalibration::intrinsics_error))
+        .def_property_readonly("extrinsics_error", string_field(&EgoVideoCalibration::extrinsics_error));
+
     serialized_class<EgoCalibration>(m, "EgoCalibration", "Encoded EGO payload.")
         .def(py::init(
                  [](const std::string& device_uid, const Serialized<EgoCameraIntrinsics>* color_left,
@@ -239,7 +284,8 @@ inline void bind_ego(py::module& m)
                     const std::vector<float>& accel_intrinsics, const std::vector<float>& gyro_intrinsics,
                     const Serialized<EgoExtrinsics>* accel_to_left, const Serialized<EgoExtrinsics>* gyro_to_left,
                     const std::string& raw_alignment_yaml, const std::string& raw_imu_yaml, uint32_t capture_epoch,
-                    const Serialized<EgoTimeAlignment>* time_alignment)
+                    const Serialized<EgoTimeAlignment>* time_alignment,
+                    const std::vector<Serialized<EgoVideoCalibration>>& video_streams)
                  {
                      EgoCalibrationT native;
                      native.device_uid = device_uid;
@@ -278,13 +324,22 @@ inline void bind_ego(py::module& m)
                          native.time_alignment = std::make_shared<EgoTimeAlignmentT>();
                          (*time_alignment)->UnPackTo(native.time_alignment.get());
                      }
+                     for (const auto& entry : video_streams)
+                     {
+                         if (!entry)
+                             throw std::invalid_argument("video_streams cannot contain null entries");
+                         auto item = std::make_shared<EgoVideoCalibrationT>();
+                         entry->UnPackTo(item.get());
+                         native.video_streams.push_back(std::move(item));
+                     }
                      return pack<EgoCalibration>(native);
                  }),
              py::arg("device_uid") = std::string{}, py::arg("color_left") = nullptr, py::arg("color_right") = nullptr,
              py::arg("left_to_right") = nullptr, py::arg("accel_intrinsics") = std::vector<float>{},
              py::arg("gyro_intrinsics") = std::vector<float>{}, py::arg("accel_to_left") = nullptr,
              py::arg("gyro_to_left") = nullptr, py::arg("raw_alignment_yaml") = std::string{},
-             py::arg("raw_imu_yaml") = std::string{}, py::arg("capture_epoch") = 0, py::arg("time_alignment") = nullptr)
+             py::arg("raw_imu_yaml") = std::string{}, py::arg("capture_epoch") = 0, py::arg("time_alignment") = nullptr,
+             py::arg("video_streams") = std::vector<Serialized<EgoVideoCalibration>>{})
         .def_property_readonly("device_uid", string_field(&EgoCalibration::device_uid))
         .def_property_readonly("color_left",
                                [](const Serialized<EgoCalibration>& self) -> py::object
@@ -324,7 +379,16 @@ inline void bind_ego(py::module& m)
         .def_property_readonly(
             "time_alignment",
             [](const Serialized<EgoCalibration>& self) -> py::object
-            { return self->time_alignment() ? py::cast(self.narrow(self->time_alignment())) : py::none(); });
+            { return self->time_alignment() ? py::cast(self.narrow(self->time_alignment())) : py::none(); })
+        .def_property_readonly("video_streams",
+                               [](const Serialized<EgoCalibration>& self)
+                               {
+                                   std::vector<Serialized<EgoVideoCalibration>> result;
+                                   if (self->video_streams())
+                                       for (const auto* entry : *self->video_streams())
+                                           result.push_back(self.narrow(entry));
+                                   return result;
+                               });
 
     bind_record<EgoCalibrationRecord, EgoCalibration>(m, "EgoCalibrationRecord", "EgoCalibration");
 

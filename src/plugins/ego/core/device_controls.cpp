@@ -3,6 +3,8 @@
 
 #include "device_controls.hpp"
 
+#include "inc/ego_camera/streams.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <iomanip>
@@ -149,6 +151,26 @@ void print_capabilities(const std::shared_ptr<ob::Device>& device)
     {
         const auto sensor_type = sensors->getSensorType(sensor_index);
         std::cout << "Sensor " << ob::TypeHelper::convertOBSensorTypeToString(sensor_type) << std::endl;
+        const char* canonical_video_stream = nullptr;
+        switch (sensor_type)
+        {
+        case OB_SENSOR_COLOR_LEFT:
+            canonical_video_stream = camera_stream_descriptor(core::EgoCameraStream_ColorLeft).name;
+            break;
+        case OB_SENSOR_COLOR_RIGHT:
+            canonical_video_stream = camera_stream_descriptor(core::EgoCameraStream_ColorRight).name;
+            break;
+        case OB_SENSOR_COLOR_SIDE_LEFT:
+            canonical_video_stream = camera_stream_descriptor(core::EgoCameraStream_ColorSideLeft).name;
+            break;
+        case OB_SENSOR_COLOR_SIDE_RIGHT:
+            canonical_video_stream = camera_stream_descriptor(core::EgoCameraStream_ColorSideRight).name;
+            break;
+        default:
+            break;
+        }
+        if (canonical_video_stream)
+            std::cout << "VideoStream " << canonical_video_stream << std::endl;
         const auto profiles = device->getSensor(sensor_type)->getStreamProfileList();
         for (uint32_t profile_index = 0; profile_index < profiles->getCount(); ++profile_index)
         {

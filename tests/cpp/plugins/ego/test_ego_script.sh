@@ -20,6 +20,7 @@ expect_failure "$SCRIPT" doctor --sdk-root "$TMPDIR_TEST/missing-sdk"
 expect_failure "$SCRIPT" build --sdk-root "$TMPDIR_TEST/missing-sdk" --preset invalid
 expect_failure "$SCRIPT" record --duration 0
 expect_failure "$SCRIPT" record --format invalid
+expect_failure "$SCRIPT" record --streams invalid
 expect_failure "$SCRIPT" record --reconnect-timeout invalid
 expect_failure "$SCRIPT" record --reconnect-interval-ms 0
 
@@ -35,6 +36,8 @@ Sensor Accel
 Sensor Gyro
 Sensor LeftColor
 Sensor RightColor
+VideoStream ColorSideLeft
+VideoStream ColorSideRight
 Sensor Audio
 CAPABILITIES
     exit 0
@@ -80,6 +83,51 @@ assert manifest == {
     },
 }
 PY
+
+QUAD_RUN="$TMPDIR_TEST/quad_recording"
+expect_failure "$SCRIPT" record --plugin "$MOCK_PLUGIN" --duration 1 --output "$QUAD_RUN" \
+    --streams quad --no-imu --no-audio --mcap-media embedded --keep-media-sidecars
+[[ "$(grep -c '^--add-stream=' "$MOCK_ARGS")" -eq 4 ]]
+for stream in ColorLeft ColorRight ColorSideLeft ColorSideRight; do
+    grep -Fx -- "--add-stream=camera=$stream,output=$QUAD_RUN/raw/$stream.h264,format=h264,width=1600,height=1200,fps=30" \
+        "$MOCK_ARGS" >/dev/null
+done
+if grep -Eq '^--enable-(imu|audio)$|^--audio-output=' "$MOCK_ARGS"; then
+    echo "Quad --no-imu --no-audio must not request optional sensors" >&2
+    exit 1
+fi
+python3 - "$QUAD_RUN/requested_profile.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    manifest = json.load(stream)
+assert set(manifest["streams"]) == {"ColorLeft", "ColorRight", "ColorSideLeft", "ColorSideRight"}
+assert all(profile == {"format": "h264", "width": 1600, "height": 1200, "fps": 30}
+           for profile in manifest["streams"].values())
+PY
+
+STEREO_ONLY_PLUGIN="$TMPDIR_TEST/stereo_only_plugin"
+sed '/^VideoStream ColorSide/d' "$MOCK_PLUGIN" > "$STEREO_ONLY_PLUGIN"
+chmod +x "$STEREO_ONLY_PLUGIN"
+expect_failure "$SCRIPT" record --plugin "$STEREO_ONLY_PLUGIN" --duration 1 \
+    --output "$TMPDIR_TEST/missing_side" --streams quad --no-imu --no-audio
+grep -Fx -- "--list-capabilities" "$MOCK_ARGS" >/dev/null
+
+QUAD_CONFIG="$TMPDIR_TEST/quad.toml"
+cat > "$QUAD_CONFIG" <<'EOF'
+[record]
+streams = "quad"
+imu = false
+audio = false
+EOF
+expect_failure "$SCRIPT" record --config "$QUAD_CONFIG" --plugin "$MOCK_PLUGIN" --duration 1 \
+    --output "$TMPDIR_TEST/quad_from_config"
+[[ "$(grep -c '^--add-stream=' "$MOCK_ARGS")" -eq 4 ]]
+expect_failure "$SCRIPT" record --config "$QUAD_CONFIG" --plugin "$MOCK_PLUGIN" --duration 1 \
+    --output "$TMPDIR_TEST/stereo_override" --streams stereo
+[[ "$(grep -c '^--add-stream=' "$MOCK_ARGS")" -eq 2 ]]
+grep -F 'height=1300' "$MOCK_ARGS" >/dev/null
 
 AUDIO_RUN="$TMPDIR_TEST/audio_recording"
 expect_failure "$SCRIPT" record --plugin "$MOCK_PLUGIN" --duration 1 --output "$AUDIO_RUN" --audio
@@ -206,6 +254,10 @@ cat > "$PACKAGE_DIR/ego_mcap_export_media" <<'EOF'
 mkdir -p "$2"
 printf '\0' > "$2/ColorLeft.h264"
 printf '\0' > "$2/ColorRight.h264"
+if [[ "${MOCK_QUAD:-0}" == 1 ]]; then
+    printf '\0' > "$2/ColorSideLeft.h264"
+    printf '\0' > "$2/ColorSideRight.h264"
+fi
 if [[ -n "${MOCK_EXPORTER_USED:-}" ]]; then
     printf '%s\n' "$0" > "$MOCK_EXPORTER_USED"
 fi
@@ -219,6 +271,16 @@ exit 0
 EOF
     chmod +x "$MOCK_BIN/$command_name"
 done
+cat > "$MOCK_BIN/python3" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1" == */stream_inventory.py ]]; then
+    printf '%s\n' ColorLeft ColorRight
+    if [[ "${MOCK_QUAD:-0}" == 1 ]]; then
+        printf '%s\n' ColorSideLeft ColorSideRight
+    fi
+fi
+exit 0
+EOF
 
 PACKAGE_RUN="$TMPDIR_TEST/package_run"
 mkdir -p "$PACKAGE_RUN"
@@ -398,10 +460,11 @@ def _record(field_offsets, object_size, timestamp):
     return data, table
 
 
-def _video(sequence, timestamp, capture_epoch=0, fps=30):
+def _video(sequence, timestamp, capture_epoch=0, fps=30, stream_id=0, height=1300):
     data, table = _record([4, 8, 16, 20, 24, 28, 0, 32, 36], 40, timestamp)
+    struct.pack_into("<B", data, table + 4, stream_id)
     struct.pack_into("<Q", data, table + 8, sequence)
-    struct.pack_into("<III", data, table + 16, 1600, 1300, fps)
+    struct.pack_into("<III", data, table + 16, 1600, height, fps)
     struct.pack_into("<B", data, table + 28, 1)
     struct.pack_into("<II", data, table + 32, capture_epoch, capture_epoch)
     return bytes(data)
@@ -469,24 +532,21 @@ class _Reader:
         base = 1_000_000_000
         video_period = 16_666_667 if scenario == "bad_video_cadence" else 33_333_333
         video_fps = 60 if scenario == "bad_video_profile" else 30
+        streams = self.fixture.get("streams", ["ColorLeft", "ColorRight"])
+        height = self.fixture.get("height", 1300)
         for frame_index in range(31):
             capture_epoch = 1 if scenario == "reconnect" and frame_index >= 15 else 0
             sequence = frame_index - 15 if capture_epoch else frame_index
             timestamp = base + sequence * video_period
             log_time = base + frame_index * video_period
-            yield from self._message(
-                "ego_metadata/ColorLeft", _video(sequence, timestamp, capture_epoch, video_fps), log_time
-            )
-            yield from self._message(
-                "ego_metadata/ColorRight", _video(sequence, timestamp, capture_epoch, video_fps), log_time
-            )
-            if mode == "embedded":
+            for stream_id, name in enumerate(streams):
+                payload_id = 0 if scenario == "wrong_side_enum" and stream_id == 3 else stream_id
+                payload = _video(sequence, timestamp, capture_epoch, video_fps, payload_id, height)
                 yield from self._message(
-                    "ego_media/ColorLeft", _video(sequence, timestamp, capture_epoch, video_fps), log_time
+                    "ego_metadata/" + name, payload, log_time
                 )
-                yield from self._message(
-                    "ego_media/ColorRight", _video(sequence, timestamp, capture_epoch, video_fps), log_time
-                )
+                if mode == "embedded" and not (scenario == "missing_embedded_side" and stream_id == 3):
+                    yield from self._message("ego_media/" + name, payload, log_time)
         yield from self._message("ego_calibration/Calibration", b"fixture", base)
         yield from self._message("ego_device/DeviceState", b"fixture", base)
 
@@ -563,7 +623,7 @@ for argument in "$@"; do
         exit 0
     fi
 done
-echo 'h264,1600,1300,60/1'
+echo "h264,1600,${VERIFY_HEIGHT:-1300},60/1"
 EOF
 chmod +x "$AUX_VERIFY_BIN/ffmpeg" "$AUX_VERIFY_BIN/ffprobe"
 
@@ -585,6 +645,63 @@ EOF
         '  IMU: accel=1000 gyro=1000 samples; audio=48000 samples; queue_peak=1 dropped=0 video_frame_sets_dropped=0' \
         > "$run_dir/logs/capture.log"
 }
+
+make_quad_verify_run() {
+    local run_dir="$1"
+    local scenario="$2"
+    local mode="$3"
+    make_aux_verify_run "$run_dir" "$scenario" "$mode"
+    python3 - "$run_dir" "$scenario" "$mode" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+run_dir = Path(sys.argv[1])
+streams = ["ColorLeft", "ColorRight", "ColorSideLeft", "ColorSideRight"]
+(run_dir / "requested_profile.json").write_text(json.dumps({
+    "version": 1,
+    "streams": {name: {"format": "h264", "width": 1600, "height": 1200, "fps": 30}
+                for name in streams},
+}), encoding="utf-8")
+actual = streams[:-1] if sys.argv[2] == "missing_side" else streams
+(run_dir / "metadata.mcap").write_text(json.dumps({
+    "scenario": sys.argv[2], "mode": sys.argv[3], "streams": actual, "height": 1200,
+}), encoding="utf-8")
+for name in streams:
+    (run_dir / "raw" / (name + ".h264")).write_bytes(b"\0")
+(run_dir / "Audio.wav").unlink()
+PY
+}
+
+for mode in metadata-only embedded; do
+    run="$TMPDIR_TEST/quad_no_aux_$mode"
+    make_quad_verify_run "$run" quad "$mode"
+    PYTHONPATH="$AUX_MCAP_MODULES" PATH="$AUX_VERIFY_BIN:$PATH" VERIFY_HEIGHT=1200 MOCK_QUAD=1 \
+        "$SCRIPT" verify "$run" --media-mode "$mode" --plugin "$PACKAGE_DIR/ego_camera_plugin" \
+        >/dev/null 2>&1
+    for stream in ColorLeft ColorRight ColorSideLeft ColorSideRight; do
+        grep -E "^$stream SHA-256: [0-9a-f]{64}$" "$run/verification_report.txt" >/dev/null
+    done
+    grep -F 'Verification passed:' "$run/verification_report.txt" >/dev/null
+done
+
+for scenario in missing_side wrong_side_enum; do
+    run="$TMPDIR_TEST/quad_$scenario"
+    make_quad_verify_run "$run" "$scenario" metadata-only
+    expect_failure env PYTHONPATH="$AUX_MCAP_MODULES" PATH="$AUX_VERIFY_BIN:$PATH" VERIFY_HEIGHT=1200 \
+        "$SCRIPT" verify "$run" --media-mode metadata-only
+    if [[ "$scenario" == missing_side ]]; then
+        grep -F 'differ from requested' "$run/verification_report.failed.txt" >/dev/null
+    else
+        grep -F 'contains mismatched video stream id' "$run/verification_report.failed.txt" >/dev/null
+    fi
+done
+
+QUAD_MISSING_MEDIA_RUN="$TMPDIR_TEST/quad_missing_embedded_side"
+make_quad_verify_run "$QUAD_MISSING_MEDIA_RUN" missing_embedded_side embedded
+expect_failure env PYTHONPATH="$AUX_MCAP_MODULES" PATH="$AUX_VERIFY_BIN:$PATH" VERIFY_HEIGHT=1200 \
+    "$SCRIPT" verify "$QUAD_MISSING_MEDIA_RUN" --media-mode embedded
+grep -F 'differ from metadata' "$QUAD_MISSING_MEDIA_RUN/verification_report.failed.txt" >/dev/null
 
 AUX_VALID_RUN="$TMPDIR_TEST/aux_valid"
 make_aux_verify_run "$AUX_VALID_RUN" valid metadata-only

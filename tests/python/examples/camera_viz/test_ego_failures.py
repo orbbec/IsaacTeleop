@@ -173,8 +173,21 @@ def test_interrupted_start_retains_thread_for_shutdown(preview, monkeypatch):
 
 
 @pytest.mark.parametrize("codec", ["h264", "h265"])
-def test_reconnect_keeps_both_decoders_on_renderer_gpu(preview, monkeypatch, codec):
-    source, cp, capture = preview
+@pytest.mark.parametrize(
+    "streams",
+    [
+        ("ColorLeft", "ColorRight"),
+        ("ColorSideLeft", "ColorSideRight"),
+        ("ColorRight", "ColorSideLeft"),
+    ],
+)
+def test_reconnect_keeps_both_decoders_on_renderer_gpu(
+    preview, monkeypatch, codec, streams
+):
+    _, cp, capture = preview
+    source = EgoSource(
+        "ego-test", width=2, height=1, left_stream=streams[0], right_stream=streams[1]
+    )
     source._format = codec
     source._renderer_cuda_device_id = 2
     decoders = [MagicMock(), MagicMock()]
@@ -194,6 +207,12 @@ def test_reconnect_keeps_both_decoders_on_renderer_gpu(preview, monkeypatch, cod
     source.start()
     join_producer(source)
     assert capture.call_count == 2
+    expected_streams = (
+        {}
+        if streams == ("ColorLeft", "ColorRight")
+        else {"left_stream": streams[0], "right_stream": streams[1]}
+    )
+    assert all(call.kwargs == expected_streams for call in capture.call_args_list)
     assert capture.return_value.close.call_count == 2
     assert make_decoder.call_count == 2
     assert all(
@@ -204,6 +223,7 @@ def test_reconnect_keeps_both_decoders_on_renderer_gpu(preview, monkeypatch, cod
         decoder.reset.assert_called_once()
         decoder.decode.assert_called_once()
     assert source.latest().timestamp_ns == 123
+    source.stop()
 
 
 def test_open_retry_is_cancellable_and_does_not_report_fatal_error(preview):
