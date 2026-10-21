@@ -2311,14 +2311,41 @@ public:
         try
         {
             value.raw_alignment_yaml = raw_data(device_, OB_RAW_DATA_ALIGN_CALIB_YAML);
-            value.raw_imu_yaml = raw_data(device_, OB_RAW_DATA_IMU_CALIB_YAML);
-            if ((!value.color_left || !value.color_right) &&
-                !populate_stereo_calibration_from_yaml(value.raw_alignment_yaml, value))
-                detail::log_error() << "Raw alignment calibration does not contain a usable stereo pair." << std::endl;
         }
         catch (const std::exception& error)
         {
-            detail::log_error() << "Raw calibration unavailable: " << error.what() << std::endl;
+            detail::log_error() << "Raw alignment calibration unavailable: " << error.what() << std::endl;
+        }
+        try
+        {
+            value.raw_imu_yaml = raw_data(device_, OB_RAW_DATA_IMU_CALIB_YAML);
+        }
+        catch (const std::exception& error)
+        {
+            detail::log_error() << "Raw IMU calibration unavailable: " << error.what() << std::endl;
+        }
+        if (!value.color_left || !value.color_right || !value.left_to_right)
+        {
+            core::EgoCalibrationT fallback;
+            if (populate_stereo_calibration_from_yaml(value.raw_alignment_yaml, fallback))
+            {
+                if (!value.color_left)
+                    value.color_left = std::move(fallback.color_left);
+                if (!value.color_right)
+                    value.color_right = std::move(fallback.color_right);
+                if (!value.left_to_right)
+                    value.left_to_right = std::move(fallback.left_to_right);
+            }
+            else
+                detail::log_error() << "Raw alignment calibration does not contain a usable stereo pair." << std::endl;
+        }
+        if (!value.accel_to_left || !value.gyro_to_left)
+        {
+            if (populate_imu_calibration_from_yaml(value.raw_imu_yaml, value))
+                detail::log_info() << "Using raw IMU calibration for missing IMU-to-left-camera extrinsics." << std::endl;
+            else
+                detail::log_error()
+                    << "Raw IMU calibration does not contain a usable IMU-to-left-camera transform." << std::endl;
         }
         if (!sdk_calibration_error.empty())
         {

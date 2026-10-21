@@ -1036,6 +1036,60 @@ def test_sidecar_hash_and_external_path_are_checked(recording, tmp_path):
         list(iter_sync_windows(path, required_streams=ALL, alignment=alignment_path))
 
 
+@pytest.mark.parametrize(
+    "stream, side", [("left_rgb", "ColorLeft"), ("right_rgb", "ColorRight")]
+)
+@pytest.mark.parametrize("trailing_bytes", [1, 30_395])
+def test_sidecar_tail_is_reported_without_changing_associations(
+    recording, stream, side, trailing_bytes
+):
+    path, model = recording()
+    windows = list(iter_sync_windows(path, required_streams=ALL, alignment=model))
+    media = path.parent / "raw" / f"{side}.h264"
+    with media.open("ab") as output:
+        output.write(bytes(trailing_bytes))
+
+    with pytest.raises(ValueError, match="fingerprint"):
+        list(iter_sync_windows(path, required_streams=ALL, alignment=model))
+
+    model["recording_fingerprint"] = recording_fingerprint(path)
+    assert (
+        list(iter_sync_windows(path, required_streams=ALL, alignment=model)) == windows
+    )
+    report = analyze_recording_sync(path, required_streams=ALL, alignment=model)
+    assert report["alignment"]["status"] == "validated"
+    assert report["issues"] == []
+    assert report["streams"][stream]["sidecar_trailing_bytes"] == trailing_bytes
+    for name in ("left_rgb", "right_rgb"):
+        assert report["streams"][name]["records"] == 4
+        assert report["streams"][name]["missing_media_records"] == 0
+        if name != stream:
+            assert report["streams"][name]["sidecar_trailing_bytes"] == 0
+    assert report["coverage"]["window_count"] == len(windows)
+    assert report["coverage"]["complete_windows"] == len(windows)
+
+
+@pytest.mark.parametrize(
+    "stream, side", [("left_rgb", "ColorLeft"), ("right_rgb", "ColorRight")]
+)
+def test_sidecar_truncation_still_rejects_missing_indexed_bytes(
+    recording, stream, side
+):
+    path, model = recording()
+    media = path.parent / "raw" / f"{side}.h264"
+    with media.open("r+b") as output:
+        output.truncate(media.stat().st_size - 1)
+    model["recording_fingerprint"] = recording_fingerprint(path)
+
+    report = analyze_recording_sync(path, required_streams=ALL, alignment=model)
+    assert report["alignment"]["status"] == "invalid"
+    assert report["streams"][stream]["missing_media_records"] == 1
+    assert report["streams"][stream]["sidecar_trailing_bytes"] == 0
+    assert report["coverage"]["complete_windows"] == 0
+    with pytest.raises(ValueError, match="shorter than its metadata index"):
+        list(iter_sync_windows(path, required_streams=ALL, alignment=model))
+
+
 def test_truncated_flatbuffer_is_rejected(recording):
     from mcap.reader import make_reader
     from isaaccapture.ego._records import RecordDecoder

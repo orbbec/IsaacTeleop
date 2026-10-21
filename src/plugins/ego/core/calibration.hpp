@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include "inc/ego_camera/ego_camera.hpp"
+#include "inc/ego_camera/calibration.hpp"
 
 #include <libobsensor/ObSensor.hpp>
 

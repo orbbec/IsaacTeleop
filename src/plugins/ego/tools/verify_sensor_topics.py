@@ -114,9 +114,154 @@ def diagnostic_record(data, label):
     return kind
 
 
+CALIBRATION_FIELDS = (
+    "color_left",
+    "color_right",
+    "left_to_right",
+    "accel_to_left",
+    "gyro_to_left",
+)
+
+
+def table_field(data, table, field_id):
+    position = field_position(data, table, field_id)
+    if position is None:
+        return None
+    return position + unpack_from("<I", data, position, "table offset")[0]
+
+
+def float_vector(data, table, field_id, label):
+    count, begin = vector_field(data, table, field_id, 4, label)
+    return list(unpack_from("<" + "f" * count, data, begin, label))
+
+
+def string_field(data, table, field_id, label):
+    count, begin = vector_field(data, table, field_id, 1, label)
+    return data[begin : begin + count].decode("utf-8")
+
+
+def calibration_record(data):
+    table, _ = record_data(data, "calibration")
+    result = {"capture_epoch": scalar_field(data, table, 10, "<I")}
+    for name, field_id in (
+        ("device_uid", 0),
+        ("raw_alignment_yaml", 8),
+        ("raw_imu_yaml", 9),
+    ):
+        result[name] = string_field(data, table, field_id, name)
+    for name, field_id in zip(CALIBRATION_FIELDS, (1, 2, 3, 6, 7)):
+        nested = table_field(data, table, field_id)
+        result[name] = None
+        if nested is None:
+            continue
+        if name.startswith("color_"):
+            result[name] = {
+                key: scalar_field(data, nested, index, fmt)
+                for index, (key, fmt) in enumerate(
+                    (
+                        ("width", "<I"),
+                        ("height", "<I"),
+                        ("fx", "<f"),
+                        ("fy", "<f"),
+                        ("cx", "<f"),
+                        ("cy", "<f"),
+                        ("distortion_model", "<i"),
+                    )
+                )
+            }
+            result[name]["distortion"] = float_vector(data, nested, 7, name)
+        else:
+            result[name] = {
+                "rotation": float_vector(data, nested, 0, name + " rotation"),
+                "translation_mm": float_vector(data, nested, 1, name + " translation"),
+            }
+    return result
+
+
+def validate_calibration(value, profiles, need_imu):
+    epoch = value["capture_epoch"]
+    required_fields = CALIBRATION_FIELDS if need_imu else CALIBRATION_FIELDS[:3]
+    for name in required_fields:
+        item = value[name]
+        label = f"Calibration epoch {epoch} {name}"
+        if item is None:
+            raise SystemExit(f"{label} is missing")
+        if name.startswith("color_"):
+            numbers = [item[key] for key in ("fx", "fy", "cx", "cy")] + item[
+                "distortion"
+            ]
+            if not all(math.isfinite(number) for number in numbers):
+                raise SystemExit(f"{label} contains non-finite intrinsics")
+            if (
+                item["width"] <= 0
+                or item["height"] <= 0
+                or item["fx"] <= 0
+                or item["fy"] <= 0
+            ):
+                raise SystemExit(
+                    f"{label} requires positive dimensions and focal lengths"
+                )
+            stream = "ColorLeft" if name == "color_left" else "ColorRight"
+            expected = profiles.get(epoch, {}).get(stream, set())
+            if expected != {(item["width"], item["height"])}:
+                raise SystemExit(
+                    f"{label} dimensions differ from video profiles {sorted(expected)}"
+                )
+        else:
+            rotation, translation = item["rotation"], item["translation_mm"]
+            if len(rotation) != 9 or len(translation) != 3:
+                raise SystemExit(f"{label} requires rotation[9] and translation_mm[3]")
+            if not all(math.isfinite(number) for number in rotation + translation):
+                raise SystemExit(f"{label} contains non-finite extrinsics")
+            for row in range(3):
+                for other in range(3):
+                    dot = sum(
+                        rotation[3 * row + k] * rotation[3 * other + k]
+                        for k in range(3)
+                    )
+                    if abs(dot - (1.0 if row == other else 0.0)) > 1e-3:
+                        raise SystemExit(f"{label} rotation is not orthonormal")
+            a, b, c, d, e, f, g, h, i = rotation
+            determinant = (
+                a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g)
+            )
+            if abs(determinant - 1.0) > 1e-3:
+                raise SystemExit(f"{label} rotation determinant must be +1")
+
+
+def compare_calibration_json(expected, actual, label="calibration JSON"):
+    if isinstance(expected, dict):
+        if not isinstance(actual, dict):
+            raise SystemExit(f"{label} differs from MCAP")
+        for key, value in expected.items():
+            if key not in actual:
+                raise SystemExit(f"{label}.{key} is missing")
+            compare_calibration_json(value, actual[key], label + "." + key)
+    elif isinstance(expected, list):
+        if not isinstance(actual, list) or len(expected) != len(actual):
+            raise SystemExit(f"{label} length differs from MCAP")
+        for index, value in enumerate(expected):
+            compare_calibration_json(value, actual[index], f"{label}[{index}]")
+    elif isinstance(expected, float):
+        # Native JSON uses decimal text; tolerate its float32 representation.
+        if (
+            isinstance(actual, bool)
+            or not isinstance(actual, (float, int))
+            or not math.isfinite(actual)
+            or not math.isclose(expected, actual, rel_tol=1e-5, abs_tol=1e-5)
+        ):
+            raise SystemExit(f"{label} differs from MCAP")
+    elif expected != actual:
+        raise SystemExit(f"{label} differs from MCAP")
+
+
 path, mode = sys.argv[1:3]
 expect_imu = "--expect-imu" in sys.argv
 expect_audio = "--expect-audio" in sys.argv
+require_calibration = "--require-calibration" in sys.argv
+calibrations = []
+video_profiles = {}
+calibration_json = None
 counts = Counter()
 last_log_time = {}
 non_monotonic = []
@@ -144,6 +289,8 @@ for argument in sys.argv[3:]:
             )
     elif argument.startswith("--record-device-diagnostics="):
         expected_policy = argument.split("=", 1)[1]
+    elif argument.startswith("--calibration-json="):
+        calibration_json = Path(argument.split("=", 1)[1])
 if expected_policy not in (None, "on", "off"):
     raise SystemExit("Expected diagnostic recording policy must be on or off")
 diagnostic_count = 0
@@ -197,9 +344,20 @@ with open(path, "rb") as stream:
             diagnostic_count += 1
             diagnostic_record(message.data, topic)
 
-        if topic == "ego_metadata/ColorLeft":
+        if topic == "ego_calibration/Calibration":
+            calibrations.append(calibration_record(message.data))
+
+        if topic in ("ego_metadata/ColorLeft", "ego_metadata/ColorRight"):
             table, timestamp = record_data(message.data, topic)
             capture_epoch = scalar_field(message.data, table, 8, "<I")
+            profiles = video_profiles.setdefault(capture_epoch, {})
+            profiles.setdefault(topic.split("/")[1], set()).add(
+                (
+                    scalar_field(message.data, table, 2, "<I"),
+                    scalar_field(message.data, table, 3, "<I"),
+                )
+            )
+        if topic == "ego_metadata/ColorLeft":
             epoch = video_epochs.setdefault(
                 capture_epoch, {"first": timestamp, "last": timestamp}
             )
@@ -380,6 +538,32 @@ if non_monotonic:
     raise SystemExit(
         f"Non-monotonic MCAP log time on topics: {sorted(set(non_monotonic))}"
     )
+
+for calibration in calibrations:
+    present = [name for name in CALIBRATION_FIELDS if calibration[name] is not None]
+    absent = [name for name in CALIBRATION_FIELDS if calibration[name] is None]
+    print(
+        f"  Calibration epoch={calibration['capture_epoch']}: present={','.join(present) or 'none'} missing={','.join(absent) or 'none'}"
+    )
+if require_calibration:
+    calibration_epochs = {value["capture_epoch"] for value in calibrations}
+    if calibration_epochs != set(video_epochs):
+        raise SystemExit(
+            f"Calibration capture epochs differ from video: {sorted(calibration_epochs)}"
+        )
+    for calibration in calibrations:
+        validate_calibration(calibration, video_profiles, expect_imu)
+    if calibration_json is not None:
+        if not calibration_json.is_file():
+            raise SystemExit(f"Missing calibration JSON: {calibration_json}")
+        expected = {
+            key: value
+            for key, value in calibrations[-1].items()
+            if key != "capture_epoch"
+        }
+        compare_calibration_json(expected, json.loads(calibration_json.read_text()))
+        print("  Calibration JSON matches the final MCAP calibration epoch: OK")
+    print("  Required structured calibration: OK")
 
 if expect_imu or expect_audio:
     for capture_epoch, epoch in video_epochs.items():

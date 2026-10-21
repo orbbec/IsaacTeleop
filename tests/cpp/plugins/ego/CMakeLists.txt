@@ -4,6 +4,7 @@
 if(TARGET ego::camera_core)
     add_executable(ego_camera_tests
         test_ego_camera.cpp
+        test_raw_calibration.cpp
         test_time_alignment.cpp
     )
 
@@ -21,4 +22,10 @@ add_test(
     NAME ego_script_tests
     COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/test_ego_script.sh"
         "${CMAKE_SOURCE_DIR}/src/plugins/ego/ego.sh"
+)
+
+add_test(
+    NAME ego_install_tests
+    COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/test_ego_install.sh"
+        "${CMAKE_SOURCE_DIR}/src/plugins/ego/install.sh"
 )

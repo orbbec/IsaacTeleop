@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include <catch2/catch_test_macros.hpp>
+#include <ego_camera/calibration.hpp>
 #include <ego_camera/cancellation.hpp>
 #include <ego_camera/ego_camera.hpp>
 #include <ego_mcap/checked_write.hpp>
@@ -97,6 +98,144 @@ std::vector<uint8_t> read_bytes(const std::filesystem::path& path)
 }
 
 } // namespace
+
+TEST_CASE("EGO IMU YAML preserves the SDK transform direction and millimeters", "[ego][calibration]")
+{
+    const std::string yaml = R"(%YAML:1.0
+---
+cam0:
+  T_cam_imu:
+    - [0, -1, 0, 48] # IMU x points down in the camera
+    - [1, 0, 0, 5]
+    - [0, 0, 1, -21.84]
+    - [0, 0, 0, 1]
+  resolution: [1600, 1300]
+cam1:
+  T_cam_imu: [[1, 0, 0, 999], [0, 1, 0, 999], [0, 0, 1, 999], [0, 0, 0, 1]]
+imu0:
+  C_gyro_i: [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+)";
+    core::EgoCalibrationT calibration;
+    calibration.raw_imu_yaml = yaml;
+    calibration.color_left = std::make_shared<core::EgoCameraIntrinsicsT>();
+    calibration.color_left->width = 1600;
+    calibration.color_left->height = 1300;
+    const auto color_left = calibration.color_left;
+    std::shared_ptr<core::EgoExtrinsicsT> preserved;
+    SECTION("both IMU fields are missing")
+    {
+    }
+    SECTION("image profile does not change the IMU rigid transform")
+    {
+        calibration.color_left->width = 640;
+        calibration.color_left->height = 480;
+    }
+    SECTION("SDK accelerometer extrinsics are preserved")
+    {
+        preserved = std::make_shared<core::EgoExtrinsicsT>();
+        preserved->translation_mm = { 7, 8, 9 };
+        calibration.accel_to_left = preserved;
+    }
+    SECTION("SDK gyroscope extrinsics are preserved")
+    {
+        preserved = std::make_shared<core::EgoExtrinsicsT>();
+        preserved->translation_mm = { 7, 8, 9 };
+        calibration.gyro_to_left = preserved;
+    }
+    REQUIRE(plugins::ego::populate_imu_calibration_from_yaml(yaml, calibration));
+    REQUIRE(calibration.accel_to_left);
+    REQUIRE(calibration.gyro_to_left);
+    for (const auto& extrinsics : { calibration.accel_to_left, calibration.gyro_to_left })
+    {
+        if (extrinsics == preserved)
+        {
+            CHECK(extrinsics->translation_mm == std::vector<float>{ 7, 8, 9 });
+            continue;
+        }
+        CHECK(extrinsics->rotation == std::vector<float>{ 0, -1, 0, 1, 0, 0, 0, 0, 1 });
+        CHECK(extrinsics->translation_mm == std::vector<float>{ 48, 5, -21.84f });
+    }
+    CHECK(calibration.color_left == color_left);
+    CHECK(calibration.raw_imu_yaml == yaml);
+}
+
+TEST_CASE("EGO IMU YAML rejects invalid transforms without partial updates", "[ego][calibration]")
+{
+    std::string yaml = "cam0:\n  T_cam_imu: [[0,-1,0,48], [1,0,0,5], [0,0,1,-21.84], [0,0,0,1]]\n";
+    SECTION("malformed YAML")
+    {
+        yaml = "cam0: [";
+    }
+    SECTION("missing cam0 is never replaced with another camera")
+    {
+        yaml.replace(0, 4, "cam1");
+    }
+    SECTION("missing transform")
+    {
+        yaml = "cam0: {resolution: [1600,1300]}";
+    }
+    SECTION("three rows")
+    {
+        yaml = "cam0: {T_cam_imu: [[1,0,0,1], [0,1,0,2], [0,0,1,3]]}";
+    }
+    SECTION("ragged matrix")
+    {
+        yaml = "cam0: {T_cam_imu: [[1,0,0], [0,1,0,2], [0,0,1,3], [0,0,0,1]]}";
+    }
+    SECTION("non-numeric element")
+    {
+        yaml = "cam0: {T_cam_imu: [[1,0,0,bad], [0,1,0,2], [0,0,1,3], [0,0,0,1]]}";
+    }
+    SECTION("infinite translation")
+    {
+        yaml = "cam0: {T_cam_imu: [[1,0,0,.inf], [0,1,0,2], [0,0,1,3], [0,0,0,1]]}";
+    }
+    SECTION("NaN rotation")
+    {
+        yaml = "cam0: {T_cam_imu: [[.nan,0,0,1], [0,1,0,2], [0,0,1,3], [0,0,0,1]]}";
+    }
+    SECTION("float overflow")
+    {
+        yaml = "cam0: {T_cam_imu: [[1,0,0,1e100], [0,1,0,2], [0,0,1,3], [0,0,0,1]]}";
+    }
+    SECTION("non-homogeneous bottom row")
+    {
+        yaml = "cam0: {T_cam_imu: [[1,0,0,1], [0,1,0,2], [0,0,1,3], [1,0,0,1]]}";
+    }
+    SECTION("scaled rotation")
+    {
+        yaml = "cam0: {T_cam_imu: [[2,0,0,1], [0,1,0,2], [0,0,1,3], [0,0,0,1]]}";
+    }
+    SECTION("reflection")
+    {
+        yaml = "cam0: {T_cam_imu: [[-1,0,0,1], [0,1,0,2], [0,0,1,3], [0,0,0,1]]}";
+    }
+    SECTION("duplicate camera")
+    {
+        yaml += yaml;
+    }
+    SECTION("duplicate transform")
+    {
+        yaml += "  T_cam_imu: [[1,0,0,1], [0,1,0,2], [0,0,1,3], [0,0,0,1]]\n";
+    }
+    SECTION("multiple documents")
+    {
+        yaml += "---\n" + yaml;
+    }
+    core::EgoCalibrationT calibration;
+    calibration.raw_imu_yaml = yaml;
+    calibration.color_left = std::make_shared<core::EgoCameraIntrinsicsT>();
+    calibration.color_left->width = 1600;
+    calibration.color_left->height = 1300;
+    calibration.accel_to_left = std::make_shared<core::EgoExtrinsicsT>();
+    calibration.accel_to_left->translation_mm = { 7, 8, 9 };
+    const auto accel = calibration.accel_to_left;
+    CHECK_FALSE(plugins::ego::populate_imu_calibration_from_yaml(yaml, calibration));
+    CHECK(calibration.accel_to_left == accel);
+    CHECK(calibration.accel_to_left->translation_mm == std::vector<float>{ 7, 8, 9 });
+    CHECK_FALSE(calibration.gyro_to_left);
+    CHECK(calibration.raw_imu_yaml == yaml);
+}
 
 TEST_CASE("EGO FrameSink writes raw MJPEG and forwards metadata", "[ego][writer][metadata]")
 {
