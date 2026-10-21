@@ -23,15 +23,24 @@ if TYPE_CHECKING:
 
 STREAMS = ("left_rgb", "right_rgb", "accel", "gyro", "audio")
 _TOPICS = {
-    "ego_metadata/ColorLeft": ("left_rgb", "core.EgoFrameMetadataRecord"),
-    "ego_metadata/ColorRight": ("right_rgb", "core.EgoFrameMetadataRecord"),
-    "ego_imu/Accel": ("accel", "core.EgoImuBatchRecord"),
-    "ego_imu/Gyro": ("gyro", "core.EgoImuBatchRecord"),
-    "ego_audio/Audio": ("audio", "core.EgoAudioChunkRecord"),
-    "ego_media/ColorLeft": ("left_rgb", "core.EgoEncodedVideoFrameRecord"),
-    "ego_media/ColorRight": ("right_rgb", "core.EgoEncodedVideoFrameRecord"),
-    "ego_media/Audio": ("audio", "core.EgoPcmAudioChunkRecord"),
-    "ego_calibration/Calibration": ("calibration", "core.EgoCalibrationRecord"),
+    "orbbec_ego_metadata/ColorLeft": ("left_rgb", "core.OrbbecEgoFrameMetadataRecord"),
+    "orbbec_ego_metadata/ColorRight": (
+        "right_rgb",
+        "core.OrbbecEgoFrameMetadataRecord",
+    ),
+    "orbbec_ego_imu/Accel": ("accel", "core.OrbbecEgoImuBatchRecord"),
+    "orbbec_ego_imu/Gyro": ("gyro", "core.OrbbecEgoImuBatchRecord"),
+    "orbbec_ego_audio/Audio": ("audio", "core.OrbbecEgoAudioChunkRecord"),
+    "orbbec_ego_media/ColorLeft": ("left_rgb", "core.OrbbecEgoEncodedVideoFrameRecord"),
+    "orbbec_ego_media/ColorRight": (
+        "right_rgb",
+        "core.OrbbecEgoEncodedVideoFrameRecord",
+    ),
+    "orbbec_ego_media/Audio": ("audio", "core.OrbbecEgoPcmAudioChunkRecord"),
+    "orbbec_ego_calibration/Calibration": (
+        "calibration",
+        "core.OrbbecEgoCalibrationRecord",
+    ),
 }
 
 
@@ -201,7 +210,7 @@ def _load(recording):
                     f"Sensor discriminator disagrees with topic {channel.topic}"
                 )
             item = {"data": data, "ref": ref, "media": None}
-            if channel.topic.startswith("ego_media/"):
+            if channel.topic.startswith("orbbec_ego_media/"):
                 vector = data.get("encoded_data", data.get("pcm_data"))
                 if not isinstance(vector, ByteVector):
                     raise ValueError(f"Missing embedded media on {channel.topic}")

@@ -260,24 +260,24 @@ from pathlib import Path
 import isaaccapture.deviceio_trackers as dt
 from isaaccapture.deviceio_session import McapRecordingConfig
 from isaaccapture.ego import configure_recording
-from isaaccapture.schema import EgoCameraStream
+from isaaccapture.schema import OrbbecEgoCameraStream
 from isaaccapture.teleop_session_manager import PluginConfig, TeleopSession
 
 run = Path("recordings/teleop_ego").resolve()
 (run / "raw").mkdir(parents=True, exist_ok=True)
 ego_entries = [
-    (dt.EgoFrameMetadataTracker(
-        "ego", [EgoCameraStream.ColorLeft, EgoCameraStream.ColorRight]
-    ), "ego_metadata"),
-    (dt.EgoImuTracker("ego"), "ego_imu"),
-    (dt.EgoCalibrationTracker("ego/Calibration"), "ego_calibration"),
-    (dt.EgoDeviceStateTracker("ego/DeviceState"), "ego_device"),
+    (dt.OrbbecEgoFrameMetadataTracker(
+        "ego", [OrbbecEgoCameraStream.ColorLeft, OrbbecEgoCameraStream.ColorRight]
+    ), "orbbec_ego_metadata"),
+    (dt.OrbbecEgoImuTracker("ego"), "orbbec_ego_imu"),
+    (dt.OrbbecEgoCalibrationTracker("ego/Calibration"), "orbbec_ego_calibration"),
+    (dt.OrbbecEgoDeviceStateTracker("ego/DeviceState"), "orbbec_ego_device"),
 ]
 existing = config.mcap_config.get_tracker_names() if config.mcap_config else []
 config.trackers.extend(tracker for tracker, _ in ego_entries)
 config.mcap_config = McapRecordingConfig(str(run / "metadata.mcap"), existing + ego_entries)
 config.plugins.append(PluginConfig(
-    plugin_name="ego_camera",
+    plugin_name="orbbec_ego_camera",
     plugin_root_id="ego_camera",
     search_paths=[Path("build-ego-py3.11/src/plugins").resolve()],
     required=True,
@@ -303,12 +303,12 @@ installation, use `install-ego-py3.11/plugins`. Keep the 15-second EGO shutdown
 budget and absolute output paths. Collection prefixes and MCAP source names
 serve different purposes; retain these canonical names for the EGO offline reader.
 
-For audio, add `(dt.EgoAudioTracker("ego/Audio"), "ego_audio")` to `ego_entries`
+For audio, add `(dt.OrbbecEgoAudioTracker("ego/Audio"), "orbbec_ego_audio")` to `ego_entries`
 before extending `config.trackers` and creating `McapRecordingConfig`, and add
 `f"--audio-output={run / 'Audio.wav'}"` to `plugin_args`. The offline reader
 requires this filename beside the session MCAP. Query current availability through
 `session.get_device_status("ego_camera/camera/ego")` after `session.step()`;
-`EgoDeviceStateTracker` carries historical diagnostic events in version-2 payloads.
+`OrbbecEgoDeviceStateTracker` carries historical diagnostic events in version-2 payloads.
 
 ### Store Media Inside MCAP
 
@@ -446,15 +446,19 @@ recordings/ego_mcap_<timestamp>/
 Audio adds `Audio.wav` only when requested with an output path. Embedded mode
 stores media in MCAP and omits video/WAV sidecars unless explicitly retained.
 
-Canonical structured topics are `ego_metadata/ColorLeft`, `ego_metadata/ColorRight`,
-`ego_imu/Accel`, `ego_imu/Gyro`, `ego_calibration/Calibration`, and
-`ego_device/DeviceState`; audio adds `ego_audio/Audio`. IMU/audio topics depend
+Schema and tracker types use `OrbbecEgo*`; the logical plugin name is
+`orbbec_ego_camera`. This is a breaking rename of the former `Ego*` Python APIs,
+`core.Ego*` schema names, and `ego_*` MCAP topics.
+
+Canonical structured topics are `orbbec_ego_metadata/ColorLeft`, `orbbec_ego_metadata/ColorRight`,
+`orbbec_ego_imu/Accel`, `orbbec_ego_imu/Gyro`, `orbbec_ego_calibration/Calibration`, and
+`orbbec_ego_device/DeviceState`; audio adds `orbbec_ego_audio/Audio`. IMU/audio topics depend
 on enabled and available sensors, and diagnostics can be omitted. Embedded
-media uses `ego_media/ColorLeft`, `ego_media/ColorRight`, and optional `ego_media/Audio`.
+media uses `orbbec_ego_media/ColorLeft`, `orbbec_ego_media/ColorRight`, and optional `orbbec_ego_media/Audio`.
 
 ### Calibration Data
 
-`ego_calibration/Calibration` stores the camera intrinsics, stereo extrinsics,
+`orbbec_ego_calibration/Calibration` stores the camera intrinsics, stereo extrinsics,
 IMU-to-left-camera extrinsics, and original alignment/IMU YAML in MCAP.
 `--calibration-output=PATH.json` exports the same calibration as a sidecar;
 `ego.sh record` creates `calibration.json` automatically.

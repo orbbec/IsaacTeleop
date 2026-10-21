@@ -26,19 +26,19 @@ public:
     {
         for_each([&](auto& sink) { sink.on_frame_metadata(frame); });
     }
-    void on_imu_batch(const core::EgoImuBatchT& value, int64_t local, int64_t device) override
+    void on_imu_batch(const core::OrbbecEgoImuBatchT& value, int64_t local, int64_t device) override
     {
         for_each([&](auto& sink) { sink.on_imu_batch(value, local, device); });
     }
-    void on_audio_chunk(const core::EgoAudioChunkT& value, int64_t local, int64_t device) override
+    void on_audio_chunk(const core::OrbbecEgoAudioChunkT& value, int64_t local, int64_t device) override
     {
         for_each([&](auto& sink) { sink.on_audio_chunk(value, local, device); });
     }
-    void on_calibration(const core::EgoCalibrationT& value, int64_t local, int64_t device) override
+    void on_calibration(const core::OrbbecEgoCalibrationT& value, int64_t local, int64_t device) override
     {
         for_each([&](auto& sink) { sink.on_calibration(value, local, device); });
     }
-    void on_device_state(const core::EgoDeviceStateT& value, int64_t local, int64_t device) override
+    void on_device_state(const core::OrbbecEgoDeviceStateT& value, int64_t local, int64_t device) override
     {
         for_each([&](auto& sink) { sink.on_device_state(value, local, device); });
     }
@@ -46,7 +46,7 @@ public:
     {
         for_each([&](auto& sink) { sink.on_encoded_video_frame(frame); });
     }
-    void on_pcm_audio_chunk(const core::EgoPcmAudioChunkT& value, int64_t local, int64_t device) override
+    void on_pcm_audio_chunk(const core::OrbbecEgoPcmAudioChunkT& value, int64_t local, int64_t device) override
     {
         for_each([&](auto& sink) { sink.on_pcm_audio_chunk(value, local, device); });
     }

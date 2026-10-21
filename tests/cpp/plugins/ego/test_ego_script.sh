@@ -630,29 +630,29 @@ class _Reader:
             timestamp = base + sequence * video_period
             log_time = base + frame_index * video_period
             yield from self._message(
-                "ego_metadata/ColorLeft", _video(sequence, timestamp, capture_epoch, video_fps), log_time
+                "orbbec_ego_metadata/ColorLeft", _video(sequence, timestamp, capture_epoch, video_fps), log_time
             )
             yield from self._message(
-                "ego_metadata/ColorRight", _video(sequence, timestamp, capture_epoch, video_fps), log_time
+                "orbbec_ego_metadata/ColorRight", _video(sequence, timestamp, capture_epoch, video_fps), log_time
             )
             if mode == "embedded":
                 yield from self._message(
-                    "ego_media/ColorLeft", _video(sequence, timestamp, capture_epoch, video_fps), log_time
+                    "orbbec_ego_media/ColorLeft", _video(sequence, timestamp, capture_epoch, video_fps), log_time
                 )
                 yield from self._message(
-                    "ego_media/ColorRight", _video(sequence, timestamp, capture_epoch, video_fps), log_time
+                    "orbbec_ego_media/ColorRight", _video(sequence, timestamp, capture_epoch, video_fps), log_time
                 )
-        yield from self._message("ego_calibration/Calibration", _calibration(scenario), base)
+        yield from self._message("orbbec_ego_calibration/Calibration", _calibration(scenario), base)
         if scenario == "reconnect":
-            yield from self._message("ego_calibration/Calibration", _calibration(scenario, 1), base + 1)
+            yield from self._message("orbbec_ego_calibration/Calibration", _calibration(scenario, 1), base + 1)
         if self.fixture.get("diagnostics"):
             yield (
-                SimpleNamespace(name="core.EgoDeviceStateRecord"),
-                SimpleNamespace(topic="ego_device/DeviceState"),
+                SimpleNamespace(name="core.OrbbecEgoDeviceStateRecord"),
+                SimpleNamespace(topic="orbbec_ego_device/DeviceState"),
                 SimpleNamespace(data=_diagnostic(base), log_time=base),
             )
         else:
-            yield from self._message("ego_device/DeviceState", b"fixture", base)
+            yield from self._message("orbbec_ego_device/DeviceState", b"fixture", base)
 
         if scenario in ("valid", "empty_imu", "bad_imu_cadence") or (scenario.startswith("calibration_") and scenario != "calibration_missing_epoch"):
             sample_index = 0
@@ -662,9 +662,9 @@ class _Reader:
                 sample_index += len(timestamps)
                 accel_timestamps = [] if scenario == "empty_imu" and sequence == 0 else timestamps
                 yield from self._message(
-                    "ego_imu/Accel", _imu(0, sequence, 1000, accel_timestamps), timestamps[-1]
+                    "orbbec_ego_imu/Accel", _imu(0, sequence, 1000, accel_timestamps), timestamps[-1]
                 )
-                yield from self._message("ego_imu/Gyro", _imu(1, sequence, 1000, timestamps), timestamps[-1])
+                yield from self._message("orbbec_ego_imu/Gyro", _imu(1, sequence, 1000, timestamps), timestamps[-1])
 
         if scenario in (
             "valid",
@@ -681,12 +681,12 @@ class _Reader:
             for sequence in range(chunks):
                 timestamp = base + cadence_scale * sequence * sample_count * 1_000_000_000 // 48_000
                 yield from self._message(
-                    "ego_audio/Audio", _audio(sequence, timestamp, sample_count, sample_format), timestamp
+                    "orbbec_ego_audio/Audio", _audio(sequence, timestamp, sample_count, sample_format), timestamp
                 )
                 if mode == "embedded" and scenario != "sparse_pcm":
                     pcm_bytes = 0 if scenario == "empty_pcm" and sequence == 0 else None
                     yield from self._message(
-                        "ego_media/Audio",
+                        "orbbec_ego_media/Audio",
                         _pcm_audio(sequence, timestamp, sample_count, pcm_bytes, sample_format),
                         timestamp,
                     )
@@ -694,7 +694,7 @@ class _Reader:
                 for sequence in range(2):
                     timestamp = base + sequence * 1_000_000_000 // 48_000
                     yield from self._message(
-                        "ego_media/Audio", _pcm_audio(sequence, timestamp, 1), timestamp
+                        "orbbec_ego_media/Audio", _pcm_audio(sequence, timestamp, 1), timestamp
                     )
 
     @staticmethod
@@ -1044,7 +1044,7 @@ AUX_SPARSE_PCM_OUTPUT="$(PYTHONPATH="$AUX_MCAP_MODULES" PATH="$AUX_VERIFY_BIN:$P
 AUX_SPARSE_PCM_STATUS=$?
 set -e
 [[ "$AUX_SPARSE_PCM_STATUS" -ne 0 ]]
-grep -F "ego_media/Audio epoch 0 contains only" <<< "$AUX_SPARSE_PCM_OUTPUT" >/dev/null
+grep -F "orbbec_ego_media/Audio epoch 0 contains only" <<< "$AUX_SPARSE_PCM_OUTPUT" >/dev/null
 
 AUX_EMPTY_PCM_RUN="$TMPDIR_TEST/aux_empty_pcm"
 make_aux_verify_run "$AUX_EMPTY_PCM_RUN" empty_pcm embedded

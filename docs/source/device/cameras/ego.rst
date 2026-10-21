@@ -5,7 +5,7 @@ EGO Camera Plugin
 =================
 
 Orbbec EGO is a stereo camera module for egocentric data collection. The
-``ego_camera`` C++ plugin records its ``ColorLeft`` and ``ColorRight`` video
+``orbbec_ego_camera`` C++ plugin records its ``ColorLeft`` and ``ColorRight`` video
 streams, with optional accelerometer, gyroscope, and microphone data. It also
 records calibration and device diagnostics.
 
@@ -129,25 +129,25 @@ With ``--collection-prefix=ego``, the collections and Python read APIs are:
      - Python tracker
      - Read method
    * - ``ego/ColorLeft``, ``ego/ColorRight``
-     - ``EgoFrameMetadataTracker``
+     - ``OrbbecEgoFrameMetadataTracker``
      - ``get_stream_data``
    * - ``ego/Accel``, ``ego/Gyro``
-     - ``EgoImuTracker``
+     - ``OrbbecEgoImuTracker``
      - ``get_stream_data``
    * - ``ego/Audio``
-     - ``EgoAudioTracker``
+     - ``OrbbecEgoAudioTracker``
      - ``get_data``
    * - ``ego/Calibration``
-     - ``EgoCalibrationTracker``
+     - ``OrbbecEgoCalibrationTracker``
      - ``get_data``
    * - ``ego/DeviceState``
-     - ``EgoDeviceStateTracker``
+     - ``OrbbecEgoDeviceStateTracker``
      - ``get_data``
 
 All reads return the schema payload directly or ``None`` when unavailable.
 Audio records are available only when audio capture is enabled.
 Camera and IMU readers select one configured stream by its index. Camera streams
-use ``EgoCameraStream`` enums; IMU sensors default to Accel and Gyro. See the
+use ``OrbbecEgoCameraStream`` enums; IMU sensors default to Accel and Gyro. See the
 :code-file:`plugin README <src/plugins/ego/README.md>` for the full tracker
 configuration example.
 
@@ -159,7 +159,7 @@ The plugin integrates with
 After ``session.step()``, query
 ``session.get_device_status(f"{plugin_root_id}/camera/ego")`` for current
 availability, using the root ID configured for the plugin.
-``EgoDeviceStateTracker`` provides historical SDK reports, capture summaries,
+``OrbbecEgoDeviceStateTracker`` provides historical SDK reports, capture summaries,
 recovery events, and device snapshots for diagnosis.
 
 Diagnostic recording is enabled by default. To omit these events from MCAP,
@@ -175,7 +175,7 @@ Multi-device sessions
 Add the EGO trackers to a
 :doc:`TeleopSession <../../teleop/teleop_session>` configuration and its
 ``McapRecordingConfig``, alongside the hand, head, or
-controller trackers. Configure ``ego_camera`` through ``PluginConfig`` with
+controller trackers. Configure ``orbbec_ego_camera`` through ``PluginConfig`` with
 ``--collection-prefix=ego`` and ``shutdown_timeout_seconds=15.0`` to allow
 capture cleanup. Complete the full source build and install its Python wheel before
 using the EGO tracker bindings and recording helper; the wrapper's

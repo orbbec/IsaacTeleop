@@ -267,12 +267,12 @@ last_log_time = {}
 non_monotonic = []
 video_epochs = {}
 imu = {
-    "ego_imu/Accel": {"sensor": 0, "batches": 0, "samples": 0, "epochs": {}},
-    "ego_imu/Gyro": {"sensor": 1, "batches": 0, "samples": 0, "epochs": {}},
+    "orbbec_ego_imu/Accel": {"sensor": 0, "batches": 0, "samples": 0, "epochs": {}},
+    "orbbec_ego_imu/Gyro": {"sensor": 1, "batches": 0, "samples": 0, "epochs": {}},
 }
-audio_topics = ["ego_audio/Audio"]
+audio_topics = ["orbbec_ego_audio/Audio"]
 if mode == "embedded":
-    audio_topics.append("ego_media/Audio")
+    audio_topics.append("orbbec_ego_media/Audio")
 audio = {
     topic: {"chunks": 0, "samples": 0, "timeline": [], "epochs": {}}
     for topic in audio_topics
@@ -320,7 +320,7 @@ with open(path, "rb") as stream:
             )
         for channel in summary.channels.values():
             schema = summary.schemas.get(channel.schema_id)
-            if schema is not None and schema.name == "core.EgoDeviceStateRecord":
+            if schema is not None and schema.name == "core.OrbbecEgoDeviceStateRecord":
                 raise SystemExit(f"Diagnostics off but channel exists: {channel.topic}")
     if policy is None:
         print(
@@ -338,16 +338,16 @@ with open(path, "rb") as stream:
             non_monotonic.append(topic)
         last_log_time[topic] = message.log_time
 
-        if _schema is not None and _schema.name == "core.EgoDeviceStateRecord":
+        if _schema is not None and _schema.name == "core.OrbbecEgoDeviceStateRecord":
             if policy == "off":
                 raise SystemExit(f"Diagnostics off but message exists: {topic}")
             diagnostic_count += 1
             diagnostic_record(message.data, topic)
 
-        if topic == "ego_calibration/Calibration":
+        if topic == "orbbec_ego_calibration/Calibration":
             calibrations.append(calibration_record(message.data))
 
-        if topic in ("ego_metadata/ColorLeft", "ego_metadata/ColorRight"):
+        if topic in ("orbbec_ego_metadata/ColorLeft", "orbbec_ego_metadata/ColorRight"):
             table, timestamp = record_data(message.data, topic)
             capture_epoch = scalar_field(message.data, table, 8, "<I")
             profiles = video_profiles.setdefault(capture_epoch, {})
@@ -357,7 +357,7 @@ with open(path, "rb") as stream:
                     scalar_field(message.data, table, 3, "<I"),
                 )
             )
-        if topic == "ego_metadata/ColorLeft":
+        if topic == "orbbec_ego_metadata/ColorLeft":
             epoch = video_epochs.setdefault(
                 capture_epoch, {"first": timestamp, "last": timestamp}
             )
@@ -443,7 +443,7 @@ with open(path, "rb") as stream:
             sample_format = scalar_field(message.data, table, 4, "<b")
             sample_count = scalar_field(message.data, table, 5, "<I")
             capture_epoch = scalar_field(
-                message.data, table, 7 if topic == "ego_media/Audio" else 8, "<I"
+                message.data, table, 7 if topic == "orbbec_ego_media/Audio" else 8, "<I"
             )
             epoch = state["epochs"].setdefault(
                 capture_epoch,
@@ -465,7 +465,7 @@ with open(path, "rb") as stream:
             if sample_count == 0:
                 raise SystemExit(f"{topic} contains an empty audio chunk")
             expected_bytes = sample_count * channels * (bits // 8)
-            if topic == "ego_media/Audio":
+            if topic == "orbbec_ego_media/Audio":
                 pcm_bytes, _pcm = vector_field(
                     message.data, table, 6, 1, f"{topic} PCM data"
                 )
@@ -515,20 +515,20 @@ expect_imu = expect_imu or any(counts[topic] for topic in imu)
 expect_audio = expect_audio or any(counts[topic] for topic in audio)
 
 required = [
-    "ego_metadata/ColorLeft",
-    "ego_metadata/ColorRight",
-    "ego_calibration/Calibration",
+    "orbbec_ego_metadata/ColorLeft",
+    "orbbec_ego_metadata/ColorRight",
+    "orbbec_ego_calibration/Calibration",
 ]
 if policy == "on" and diagnostic_count == 0:
-    raise SystemExit("Diagnostics enabled but no EgoDeviceState records exist")
+    raise SystemExit("Diagnostics enabled but no OrbbecEgoDeviceState records exist")
 if mode == "embedded":
-    required += ["ego_media/ColorLeft", "ego_media/ColorRight"]
+    required += ["orbbec_ego_media/ColorLeft", "orbbec_ego_media/ColorRight"]
 if expect_imu:
-    required += ["ego_imu/Accel", "ego_imu/Gyro"]
+    required += ["orbbec_ego_imu/Accel", "orbbec_ego_imu/Gyro"]
 if expect_audio:
-    required += ["ego_audio/Audio"]
+    required += ["orbbec_ego_audio/Audio"]
     if mode == "embedded":
-        required += ["ego_media/Audio"]
+        required += ["orbbec_ego_media/Audio"]
 missing = [topic for topic in required if counts[topic] == 0]
 for topic in sorted(counts):
     print(f"  {topic}: {counts[topic]}")
@@ -603,7 +603,7 @@ if expect_imu:
                 f"  {topic}: epoch={capture_epoch} batches={epoch['batches']} samples={epoch['samples']} "
                 f"declared_hz={state['rate']} raw_device_hz={observed_rate:.3f}"
             )
-    if imu["ego_imu/Accel"]["rate"] != imu["ego_imu/Gyro"]["rate"]:
+    if imu["orbbec_ego_imu/Accel"]["rate"] != imu["orbbec_ego_imu/Gyro"]["rate"]:
         raise SystemExit("Accel and Gyro declare different sample rates")
 
 if expect_audio:
@@ -648,8 +648,8 @@ if expect_audio:
                 f"duration_s={duration / 1_000_000_000:.3f} raw_device_hz={observed_rate:.3f}"
             )
     if mode == "embedded":
-        metadata = audio["ego_audio/Audio"]
-        media = audio["ego_media/Audio"]
+        metadata = audio["orbbec_ego_audio/Audio"]
+        media = audio["orbbec_ego_media/Audio"]
         if metadata["timeline"] != media["timeline"]:
             raise SystemExit("Embedded PCM and audio-metadata timelines differ")
 print("MCAP Footer, required topics, and per-topic log-time monotonicity: OK")

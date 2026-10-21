@@ -69,9 +69,9 @@ bool valid_imu_transform(const std::array<std::array<double, 4>, 4>& matrix)
 
 } // namespace
 
-bool populate_imu_calibration_from_yaml(const std::string& yaml, core::EgoCalibrationT& calibration)
+bool populate_imu_calibration_from_yaml(const std::string& yaml, core::OrbbecEgoCalibrationT& calibration)
 {
-    core::EgoExtrinsicsT extrinsics;
+    core::OrbbecEgoExtrinsicsT extrinsics;
     try
     {
         std::string parse_input = yaml;
@@ -116,9 +116,9 @@ bool populate_imu_calibration_from_yaml(const std::string& yaml, core::EgoCalibr
     auto accel = calibration.accel_to_left;
     auto gyro = calibration.gyro_to_left;
     if (!accel)
-        accel = std::make_shared<core::EgoExtrinsicsT>(extrinsics);
+        accel = std::make_shared<core::OrbbecEgoExtrinsicsT>(extrinsics);
     if (!gyro)
-        gyro = std::make_shared<core::EgoExtrinsicsT>(extrinsics);
+        gyro = std::make_shared<core::OrbbecEgoExtrinsicsT>(extrinsics);
     calibration.accel_to_left = std::move(accel);
     calibration.gyro_to_left = std::move(gyro);
     return true;
@@ -143,7 +143,7 @@ std::vector<float> yaml_numbers(const std::string& text)
     return numbers;
 }
 
-bool populate_stereo_calibration_from_yaml(const std::string& yaml, core::EgoCalibrationT& calibration)
+bool populate_stereo_calibration_from_yaml(const std::string& yaml, core::OrbbecEgoCalibrationT& calibration)
 {
     struct Camera
     {
@@ -240,7 +240,7 @@ bool populate_stereo_calibration_from_yaml(const std::string& yaml, core::EgoCal
         return false;
     const auto intrinsics = [](const Camera& camera)
     {
-        auto result = std::make_shared<core::EgoCameraIntrinsicsT>();
+        auto result = std::make_shared<core::OrbbecEgoCameraIntrinsicsT>();
         result->width = camera.width;
         result->height = camera.height;
         result->fx = camera.fx;
@@ -255,7 +255,7 @@ bool populate_stereo_calibration_from_yaml(const std::string& yaml, core::EgoCal
     calibration.color_right = intrinsics(cameras[1]);
     if (cameras[1].rotation.size() == 9 && cameras[1].translation.size() == 3)
     {
-        calibration.left_to_right = std::make_shared<core::EgoExtrinsicsT>();
+        calibration.left_to_right = std::make_shared<core::OrbbecEgoExtrinsicsT>();
         calibration.left_to_right->rotation = cameras[1].rotation;
         calibration.left_to_right->translation_mm = cameras[1].translation;
     }
