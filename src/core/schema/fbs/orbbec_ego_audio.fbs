@@ -38,7 +38,7 @@ table OrbbecEgoAudioChunkRecord {
 
 // PCM block retained verbatim in an embedded-media MCAP.  The existing
 // OrbbecEgoAudioChunk remains the lightweight WAV-sidecar index used by the
-// metadata-only and SchemaPusher paths.
+// sidecar and SchemaPusher paths.
 table OrbbecEgoPcmAudioChunk {
   sequence_number: uint64 (id: 0);
   sample_rate_hz: uint32 (id: 1);

@@ -11,5 +11,5 @@ with open(sys.argv[1], "rb") as stream:
 print(
     "embedded"
     if any(topic.startswith("orbbec_ego_media/") for topic in topics)
-    else "metadata-only"
+    else "sidecar"
 )

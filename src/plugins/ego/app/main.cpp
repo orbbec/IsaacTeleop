@@ -96,11 +96,11 @@ plugins::ego::StreamConfig parse_stream_arg(const std::string& arg)
 
 plugins::ego::McapMediaMode parse_mcap_media_mode(const std::string& value)
 {
-    if (value == "metadata-only")
-        return plugins::ego::McapMediaMode::MetadataOnly;
+    if (value == "sidecar")
+        return plugins::ego::McapMediaMode::Sidecar;
     if (value == "embedded")
         return plugins::ego::McapMediaMode::Embedded;
-    throw std::runtime_error("--mcap-media must be metadata-only or embedded");
+    throw std::runtime_error("--mcap-media must be sidecar or embedded");
 }
 
 void print_usage(const char* program)
@@ -124,7 +124,7 @@ void print_usage(const char* program)
               << "Metadata (mutually exclusive):\n"
               << "  --mcap-filename=PATH            Write a local MCAP\n"
               << "  --collection-prefix=PREFIX      Publish metadata via OpenXR tensors\n"
-              << "  --mcap-media=metadata-only|embedded (default metadata-only)\n"
+              << "  --mcap-media=sidecar|embedded (default sidecar)\n"
               << "  --keep-media-sidecars           Keep raw video/WAV with embedded MCAP\n"
               << "  --mcap-media-spool=PATH         Embedded-media fragment for TeleopSession merger\n"
               << "  --record-device-diagnostics=on|off  Save detailed diagnostics in local MCAP (default on)\n"

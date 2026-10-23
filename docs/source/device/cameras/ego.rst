@@ -72,8 +72,8 @@ Use a fresh output directory for each recording:
    RUN="recordings/ego_$(date +%Y%m%d_%H%M%S)"
    ./src/plugins/ego/ego.sh record --duration 30 --output "$RUN"
 
-The wrapper writes video under ``raw/``, structured data to ``metadata.mcap``,
-and calibration to ``calibration.json``. It preserves the requested profile,
+The default ``sidecar`` mode writes video under ``raw/``, structured data to
+``metadata.mcap``, and calibration to ``calibration.json``. It preserves the requested profile,
 device/software identity, and capture log, then verifies the recording.
 To repeat the integrity checks later:
 
@@ -94,7 +94,8 @@ Audio capture and export are supported. Synchronizing audio with video and IMU
 requires an independently validated time model and evidence of sample
 continuity; SDK audio timestamps alone do not establish a shared sampling clock.
 
-For one self-contained MCAP with encoded video and any enabled audio PCM:
+Use ``embedded`` mode for one self-contained MCAP with encoded video and any
+enabled audio PCM:
 
 .. code-block:: bash
 

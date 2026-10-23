@@ -316,8 +316,11 @@ Media layout is separate from the recording workflow:
 
 | Layout | Option | Media location |
 |---|---|---|
-| Sidecar (default) | `--mcap-media=metadata-only` | Video/WAV files beside structured MCAP data. |
+| Sidecar (default) | `--mcap-media=sidecar` | Video/WAV files beside structured MCAP data. |
 | Embedded | `--mcap-media=embedded` | Encoded video and enabled PCM audio inside MCAP, without transcoding. |
+
+Both layouts record the selected video streams and optional audio; the option
+controls where media is stored. Only `sidecar` and `embedded` are accepted.
 
 For a self-contained local recording, omit video output paths:
 
@@ -379,7 +382,7 @@ These entries describe the native executable, not wrapper presets:
 | `--enable-audio` / `--audio-output=PATH.wav` | Off | Enable PCM; the output option also writes WAV. |
 | `--preview` | Off | Open SDL preview. |
 | `--mcap-filename=PATH` / `--collection-prefix=PREFIX` | Neither | Choose local MCAP or live publication. |
-| `--mcap-media=metadata-only\|embedded` | `metadata-only` | Choose media layout; embedded requires an MCAP/publication destination. |
+| `--mcap-media=sidecar\|embedded` | `sidecar` | Choose media layout; embedded requires an MCAP/publication destination. |
 | `--keep-media-sidecars` | Off | Retain sidecars in embedded mode. |
 | `--mcap-media-spool=PATH` | None | Required fragment for embedded TeleopSession. |
 | `--record-device-diagnostics=on\|off` | `on` | Include diagnostic events in MCAP. |

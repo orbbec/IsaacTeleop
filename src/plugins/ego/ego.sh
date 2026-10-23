@@ -44,7 +44,7 @@ Common record options:
   --audio                        Request optional audio (default: off; synchronization remains unverified).
   --no-audio                     Disable audio, overriding an audio-enabled configuration.
   --preview                       Enable the plugin's SDL preview (requires a --preview build).
-  --mcap-media MODE               metadata-only (default) or embedded.
+  --mcap-media MODE               sidecar (default) or embedded.
   --record-device-diagnostics=on|off  Save detailed diagnostics in MCAP (default on).
   --keep-media-sidecars           Retain H.264/H.265/MJPEG and WAV beside embedded MCAP.
   --require-calibration           Require complete structured calibration during verification.
@@ -457,7 +457,7 @@ command_record() {
     # Optional audio must be requested explicitly, not enabled by sensor discovery.
     local request_audio=0
     local preview=0
-    local media_mode="metadata-only"
+    local media_mode="sidecar"
     local keep_sidecars=0
     local record_diagnostics=on
     local -a passthrough=()
@@ -512,7 +512,11 @@ command_record() {
             --no-preview) preview=0; shift ;;
             --record-device-diagnostics=*) record_diagnostics="${1#*=}"; shift ;;
             --record-device-diagnostics) record_diagnostics="${2:-}"; shift 2 ;;
-            --mcap-media) media_mode="${2:-}"; shift 2 ;;
+            --mcap-media)
+                media_mode="${2:-}"
+                [[ "$media_mode" == "sidecar" || "$media_mode" == "embedded" ]] || record_usage_error "--mcap-media must be sidecar or embedded"
+                shift 2
+                ;;
             --keep-media-sidecars) keep_sidecars=1; shift ;;
             --no-keep-media-sidecars) keep_sidecars=0; shift ;;
             --preset) preset="${2:-}"; shift 2 ;;
@@ -524,14 +528,14 @@ command_record() {
     done
     preset_python_version "$preset" >/dev/null
     [[ "$format" == "mjpg" || "$format" == "h264" || "$format" == "h265" ]] || record_usage_error "--format must be mjpg, h264, or h265"
-    [[ "$media_mode" == "metadata-only" || "$media_mode" == "embedded" ]] || record_usage_error "--mcap-media must be metadata-only or embedded"
+    [[ "$media_mode" == "sidecar" || "$media_mode" == "embedded" ]] || record_usage_error "--mcap-media must be sidecar or embedded"
     [[ "$width" =~ ^[1-9][0-9]*$ && "$height" =~ ^[1-9][0-9]*$ && "$fps" =~ ^[1-9][0-9]*$ ]] || record_usage_error "width, height, and fps must be positive integers"
     [[ "$reconnect_timeout" =~ ^[0-9]+$ ]] || record_usage_error "--reconnect-timeout must be a non-negative integer"
     [[ "$reconnect_interval_ms" =~ ^[1-9][0-9]*$ ]] || record_usage_error "--reconnect-interval-ms must be a positive integer"
     if [[ -n "$duration" ]]; then
         [[ "$duration" =~ ^[1-9][0-9]*$ ]] || record_usage_error "--duration must be a positive integer"
     fi
-    if (( keep_sidecars )) && [[ "$media_mode" == "metadata-only" ]]; then
+    if (( keep_sidecars )) && [[ "$media_mode" == "sidecar" ]]; then
         record_usage_error "--keep-media-sidecars is only valid with embedded media"
     fi
 
@@ -557,7 +561,7 @@ command_record() {
     fi
     [[ ! -e "$run_dir" ]] || die "Output directory already exists: $run_dir"
     mkdir -p "$run_dir/logs"
-    if [[ "$media_mode" == "metadata-only" ]] || (( keep_sidecars )); then
+    if [[ "$media_mode" == "sidecar" ]] || (( keep_sidecars )); then
         mkdir -p "$run_dir/raw"
     fi
     write_requested_profile_manifest "$run_dir/requested_profile.json" "$format" "$width" "$height" "$fps" "$record_diagnostics"
@@ -595,7 +599,7 @@ command_record() {
         "--reconnect-timeout=$reconnect_timeout"
         "--reconnect-interval-ms=$reconnect_interval_ms"
     )
-    if [[ "$media_mode" == "metadata-only" ]] || (( keep_sidecars )); then
+    if [[ "$media_mode" == "sidecar" ]] || (( keep_sidecars )); then
         plugin_args+=(
             "--add-stream=camera=ColorLeft,output=$run_dir/raw/ColorLeft.$extension,format=$format,width=$width,height=$height,fps=$fps"
             "--add-stream=camera=ColorRight,output=$run_dir/raw/ColorRight.$extension,format=$format,width=$width,height=$height,fps=$fps"
@@ -610,7 +614,7 @@ command_record() {
     (( preview )) && plugin_args+=(--preview)
     (( enable_imu )) && plugin_args+=(--enable-imu --imu-rate=1000)
     if (( enable_audio )); then
-        if [[ "$media_mode" == "metadata-only" ]] || (( keep_sidecars )); then
+        if [[ "$media_mode" == "sidecar" ]] || (( keep_sidecars )); then
             plugin_args+=("--audio-output=$run_dir/Audio.wav")
         else
             plugin_args+=(--enable-audio)
@@ -772,7 +776,11 @@ command_verify_impl() {
         case "$1" in
             --preset) preset="${2:-}"; shift 2 ;;
             --plugin) plugin_path="${2:-}"; shift 2 ;;
-            --media-mode) expected_mode="${2:-}"; shift 2 ;;
+            --media-mode)
+                expected_mode="${2:-}"
+                [[ "$expected_mode" == "sidecar" || "$expected_mode" == "embedded" ]] || die "Unknown MCAP media mode '$expected_mode'"
+                shift 2
+                ;;
             --expect-imu) expect_imu=1; shift ;;
             --expect-audio) expect_audio=1; shift ;;
             --require-calibration) require_calibration=1; shift ;;
@@ -796,7 +804,7 @@ command_verify_impl() {
     if [[ -z "$mode" ]]; then
         mode="$(python3 "$SCRIPT_DIR/tools/detect_media_mode.py" "$mcap")"
     fi
-    [[ "$mode" == "metadata-only" || "$mode" == "embedded" ]] || die "Unknown MCAP media mode '$mode'"
+    [[ "$mode" == "sidecar" || "$mode" == "embedded" ]] || die "Unknown MCAP media mode '$mode'"
 
     local -a topic_check_args=("$mcap" "$mode" "--requested-profile=$run_dir/requested_profile.json")
     (( expect_imu )) && topic_check_args+=(--expect-imu)

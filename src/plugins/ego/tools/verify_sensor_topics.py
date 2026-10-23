@@ -256,6 +256,8 @@ def compare_calibration_json(expected, actual, label="calibration JSON"):
 
 
 path, mode = sys.argv[1:3]
+if mode not in ("sidecar", "embedded"):
+    raise SystemExit(f"MCAP media mode must be sidecar or embedded: {mode!r}")
 expect_imu = "--expect-imu" in sys.argv
 expect_audio = "--expect-audio" in sys.argv
 require_calibration = "--require-calibration" in sys.argv

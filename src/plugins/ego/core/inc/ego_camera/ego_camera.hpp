@@ -32,7 +32,7 @@ struct StreamConfig
 
 enum class McapMediaMode
 {
-    MetadataOnly,
+    Sidecar,
     Embedded,
 };
 
@@ -74,7 +74,7 @@ struct CaptureConfig
     bool record_device_diagnostics = true;
     std::string mcap_filename;
     std::string mcap_media_spool;
-    McapMediaMode mcap_media_mode = McapMediaMode::MetadataOnly;
+    McapMediaMode mcap_media_mode = McapMediaMode::Sidecar;
     bool keep_media_sidecars = false;
     std::string calibration_output;
     std::string time_alignment;

@@ -43,7 +43,7 @@ table OrbbecEgoFrameMetadataRecord {
 }
 
 // Encoded access unit retained verbatim in an embedded-media MCAP.  This is
-// deliberately separate from OrbbecEgoFrameMetadata: metadata-only recordings
+// deliberately separate from OrbbecEgoFrameMetadata: sidecar recordings
 // stay small, while an archive can opt in to the high-throughput payload.
 table OrbbecEgoEncodedVideoFrame {
   stream: OrbbecEgoCameraStream (id: 0);

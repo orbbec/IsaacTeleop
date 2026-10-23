@@ -57,6 +57,8 @@ def video_record(data, embedded_media):
 
 
 path, mode = sys.argv[1:3]
+if mode not in ("sidecar", "embedded"):
+    raise SystemExit(f"MCAP media mode must be sidecar or embedded: {mode!r}")
 expected_counts = {
     "ColorLeft": int(sys.argv[3]),
     "ColorRight": int(sys.argv[4]),

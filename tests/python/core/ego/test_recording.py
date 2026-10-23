@@ -198,7 +198,7 @@ def test_invalid_recording_fails_before_capture(setup, invalid):
     elif invalid == "spool":
         setup.config.plugins[0].plugin_args[-1] = "--mcap-media-spool=other.mcap"
     elif invalid == "mode":
-        setup.config.plugins[0].plugin_args[1] = "--mcap-media=metadata-only"
+        setup.config.plugins[0].plugin_args[1] = "--mcap-media=sidecar"
     elif invalid == "missing_merger":
         setup.executable.unlink()
     elif invalid == "existing_output":

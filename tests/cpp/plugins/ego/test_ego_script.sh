@@ -15,6 +15,20 @@ expect_failure() {
     fi
 }
 
+expect_failure_message() {
+    local expected="$1"
+    shift
+    local output
+    if output="$("$@" 2>&1)"; then
+        echo "Expected command to fail: $*" >&2
+        exit 1
+    fi
+    if ! grep -F -- "$expected" <<< "$output" >/dev/null; then
+        printf 'Expected failure containing %s: %s\n%s\n' "$expected" "$*" "$output" >&2
+        exit 1
+    fi
+}
+
 "$SCRIPT" --help >/dev/null
 expect_failure "$SCRIPT" doctor --sdk-root "$TMPDIR_TEST/missing-sdk"
 expect_failure "$SCRIPT" build --sdk-root "$TMPDIR_TEST/missing-sdk" --preset invalid
@@ -59,6 +73,7 @@ if grep -Eq '^--enable-audio$|^--audio-output=' "$MOCK_ARGS"; then
     exit 1
 fi
 grep -Fx -- "--mcap-filename=$RUN/metadata.mcap" "$MOCK_ARGS" >/dev/null
+grep -Fx -- "--mcap-media=sidecar" "$MOCK_ARGS" >/dev/null
 grep -Fx -- "--reconnect-timeout=30" "$MOCK_ARGS" >/dev/null
 grep -Fx -- "--reconnect-interval-ms=1000" "$MOCK_ARGS" >/dev/null
 grep -Fx -- "--bitrate=8" "$MOCK_ARGS" >/dev/null
@@ -84,6 +99,27 @@ PY
 AUDIO_RUN="$TMPDIR_TEST/audio_recording"
 expect_failure "$SCRIPT" record --plugin "$MOCK_PLUGIN" --duration 1 --output "$AUDIO_RUN" --audio
 grep -Fx -- "--audio-output=$AUDIO_RUN/Audio.wav" "$MOCK_ARGS" >/dev/null
+
+SIDECAR_RUN="$TMPDIR_TEST/sidecar_recording"
+expect_failure "$SCRIPT" record --plugin "$MOCK_PLUGIN" --duration 1 \
+    --output "$SIDECAR_RUN" --mcap-media sidecar
+grep -Fx -- "--mcap-media=sidecar" "$MOCK_ARGS" >/dev/null
+grep -F -- "output=$SIDECAR_RUN/raw/ColorLeft.h264" "$MOCK_ARGS" >/dev/null
+grep -F -- "output=$SIDECAR_RUN/raw/ColorRight.h264" "$MOCK_ARGS" >/dev/null
+
+for invalid_mode in metadata-only invalid; do
+    invalid_run="$TMPDIR_TEST/invalid_cli_$invalid_mode"
+    expect_failure_message "--mcap-media must be sidecar or embedded" \
+        "$SCRIPT" record --plugin "$MOCK_PLUGIN" --duration 1 \
+        --output "$invalid_run" --mcap-media "$invalid_mode"
+    [[ ! -e "$invalid_run" ]]
+    for override_mode in sidecar embedded; do
+        expect_failure_message "--mcap-media must be sidecar or embedded" \
+            "$SCRIPT" record --plugin "$MOCK_PLUGIN" --duration 1 \
+            --output "$invalid_run" --mcap-media "$invalid_mode" --mcap-media "$override_mode"
+        [[ ! -e "$invalid_run" ]]
+    done
+done
 
 CONFIG_RUN="$TMPDIR_TEST/config_recording"
 CONFIG_FILE="$TMPDIR_TEST/record.toml"
@@ -148,6 +184,30 @@ EOF
 expect_failure "$SCRIPT" record --config "$INVALID_CONFIG"
 expect_failure "$SCRIPT" record --config "$TMPDIR_TEST/missing.toml"
 
+SIDECAR_CONFIG="$TMPDIR_TEST/sidecar.toml"
+SIDECAR_CONFIG_RUN="$TMPDIR_TEST/sidecar_config_recording"
+printf '[record]\nmcap_media = "sidecar"\n' > "$SIDECAR_CONFIG"
+expect_failure "$SCRIPT" record --config "$SIDECAR_CONFIG" --plugin "$MOCK_PLUGIN" \
+    --duration 1 --output "$SIDECAR_CONFIG_RUN" --audio
+grep -Fx -- "--mcap-media=sidecar" "$MOCK_ARGS" >/dev/null
+grep -Fx -- "--audio-output=$SIDECAR_CONFIG_RUN/Audio.wav" "$MOCK_ARGS" >/dev/null
+
+for invalid_mode in metadata-only invalid; do
+    invalid_config="$TMPDIR_TEST/invalid_config_$invalid_mode.toml"
+    printf '[record]\nmcap_media = "%s"\n' "$invalid_mode" > "$invalid_config"
+    for override_mode in none sidecar embedded; do
+        invalid_run="$TMPDIR_TEST/invalid_config_${invalid_mode}_$override_mode"
+        override_args=()
+        if [[ "$override_mode" != none ]]; then
+            override_args=(--mcap-media "$override_mode")
+        fi
+        expect_failure_message "mcap_media must be sidecar or embedded" \
+            "$SCRIPT" record --config "$invalid_config" --plugin "$MOCK_PLUGIN" \
+            --duration 1 --output "$invalid_run" "${override_args[@]}"
+        [[ ! -e "$invalid_run" ]]
+    done
+done
+
 SIGNAL_PLUGIN="$TMPDIR_TEST/signal_plugin"
 cat > "$SIGNAL_PLUGIN" <<'EOF'
 #!/usr/bin/env bash
@@ -170,7 +230,8 @@ set -e
 grep -F "Capture failed with status 7" <<< "$SIGNAL_OUTPUT" >/dev/null
 
 RUN_EMBEDDED="$TMPDIR_TEST/embedded"
-expect_failure "$SCRIPT" record --plugin "$MOCK_PLUGIN" --duration 1 --output "$RUN_EMBEDDED" --mcap-media embedded
+expect_failure "$SCRIPT" record --plugin "$MOCK_PLUGIN" --duration 1 --output "$RUN_EMBEDDED" \
+    --mcap-media sidecar --mcap-media embedded
 grep -Fx -- "--mcap-media=embedded" "$MOCK_ARGS" >/dev/null
 if grep -Eq '^--enable-audio$|^--audio-output=' "$MOCK_ARGS"; then
     echo "Default embedded capture must not request audio" >&2
@@ -759,15 +820,44 @@ EOF
 }
 
 AUX_VALID_RUN="$TMPDIR_TEST/aux_valid"
-make_aux_verify_run "$AUX_VALID_RUN" valid metadata-only
+make_aux_verify_run "$AUX_VALID_RUN" valid sidecar
+DETECTED_MODE="$(PYTHONPATH="$AUX_MCAP_MODULES" python3 \
+    "$(dirname "$SCRIPT")/tools/detect_media_mode.py" "$AUX_VALID_RUN/metadata.mcap")"
+[[ "$DETECTED_MODE" == sidecar ]]
+AUX_EMBEDDED_RUN="$TMPDIR_TEST/aux_embedded"
+make_aux_verify_run "$AUX_EMBEDDED_RUN" valid embedded
+DETECTED_MODE="$(PYTHONPATH="$AUX_MCAP_MODULES" python3 \
+    "$(dirname "$SCRIPT")/tools/detect_media_mode.py" "$AUX_EMBEDDED_RUN/metadata.mcap")"
+[[ "$DETECTED_MODE" == embedded ]]
+
+for invalid_mode in metadata-only invalid; do
+    expect_failure_message "Unknown MCAP media mode '$invalid_mode'" \
+        env PYTHONPATH="$AUX_MCAP_MODULES" PATH="$AUX_VERIFY_BIN:$PATH" \
+        "$SCRIPT" verify "$AUX_VALID_RUN" --media-mode "$invalid_mode"
+    for override_mode in sidecar embedded; do
+        expect_failure_message "Unknown MCAP media mode '$invalid_mode'" \
+            env PYTHONPATH="$AUX_MCAP_MODULES" PATH="$AUX_VERIFY_BIN:$PATH" \
+            "$SCRIPT" verify "$AUX_VALID_RUN" --media-mode "$invalid_mode" --media-mode "$override_mode"
+    done
+    expect_failure_message "MCAP media mode must be sidecar or embedded" \
+        env PYTHONPATH="$AUX_MCAP_MODULES" python3 \
+        "$(dirname "$SCRIPT")/tools/verify_sensor_topics.py" \
+        "$TMPDIR_TEST/missing.mcap" "$invalid_mode"
+    expect_failure_message "MCAP media mode must be sidecar or embedded" \
+        env PYTHONPATH="$AUX_MCAP_MODULES" python3 \
+        "$(dirname "$SCRIPT")/tools/verify_video_timing.py" \
+        "$TMPDIR_TEST/missing.mcap" "$invalid_mode" 31 31 \
+        "$TMPDIR_TEST/missing_profile.json"
+done
+
 PYTHONPATH="$AUX_MCAP_MODULES" PATH="$AUX_VERIFY_BIN:$PATH" \
-    "$SCRIPT" verify "$AUX_VALID_RUN" --media-mode metadata-only --expect-imu --expect-audio \
+    "$SCRIPT" verify "$AUX_VALID_RUN" --media-mode sidecar --expect-imu --expect-audio \
     >/dev/null 2>&1
 grep -F 'raw_device_fps=30.000' "$AUX_VALID_RUN/verification_report.txt" >/dev/null
 grep -F 'ffprobe_rate): h264,1600,1300,60/1' "$AUX_VALID_RUN/verification_report.txt" >/dev/null
 
 PYTHONPATH="$AUX_MCAP_MODULES" PATH="$AUX_VERIFY_BIN:$PATH" \
-    "$SCRIPT" verify "$AUX_VALID_RUN" --media-mode metadata-only --require-calibration --expect-imu \
+    "$SCRIPT" verify "$AUX_VALID_RUN" --media-mode sidecar --require-calibration --expect-imu \
     >/dev/null 2>&1
 grep -F 'Required structured calibration: OK' "$AUX_VALID_RUN/verification_report.txt" >/dev/null
 grep -F 'Calibration JSON matches' "$AUX_VALID_RUN/verification_report.txt" >/dev/null
@@ -775,20 +865,20 @@ for scenario in calibration_missing calibration_bad_rotation calibration_reflect
         calibration_bad_translation calibration_nonfinite calibration_bad_dimensions \
         calibration_bad_focal calibration_missing_epoch; do
     run="$TMPDIR_TEST/$scenario"
-    make_aux_verify_run "$run" "$scenario" metadata-only
+    make_aux_verify_run "$run" "$scenario" sidecar
     expect_failure env PYTHONPATH="$AUX_MCAP_MODULES" PATH="$AUX_VERIFY_BIN:$PATH" \
-        "$SCRIPT" verify "$run" --media-mode metadata-only --require-calibration
+        "$SCRIPT" verify "$run" --media-mode sidecar --require-calibration
     grep -F 'Calibration' "$run/verification_report.failed.txt" >/dev/null
 done
 CALIBRATION_OPTIONAL_RUN="$TMPDIR_TEST/calibration_missing"
 PYTHONPATH="$AUX_MCAP_MODULES" PATH="$AUX_VERIFY_BIN:$PATH" \
-    "$SCRIPT" verify "$CALIBRATION_OPTIONAL_RUN" --media-mode metadata-only >/dev/null 2>&1
+    "$SCRIPT" verify "$CALIBRATION_OPTIONAL_RUN" --media-mode sidecar >/dev/null 2>&1
 grep -F 'missing=gyro_to_left' "$CALIBRATION_OPTIONAL_RUN/verification_report.txt" >/dev/null
 CALIBRATION_JSON_RUN="$TMPDIR_TEST/calibration_json_mismatch"
-make_aux_verify_run "$CALIBRATION_JSON_RUN" valid metadata-only
+make_aux_verify_run "$CALIBRATION_JSON_RUN" valid sidecar
 sed -i 's/500.25/999.25/' "$CALIBRATION_JSON_RUN/calibration.json"
 expect_failure env PYTHONPATH="$AUX_MCAP_MODULES" PATH="$AUX_VERIFY_BIN:$PATH" \
-    "$SCRIPT" verify "$CALIBRATION_JSON_RUN" --media-mode metadata-only --require-calibration
+    "$SCRIPT" verify "$CALIBRATION_JSON_RUN" --media-mode sidecar --require-calibration
 grep -F 'calibration JSON.color_left.fx differs' "$CALIBRATION_JSON_RUN/verification_report.failed.txt" >/dev/null
 
 FINALIZE_PLUGIN="$TMPDIR_TEST/finalize_plugin"
@@ -965,9 +1055,9 @@ PY
 
 for scenario in bad_video_profile bad_video_cadence; do
     run="$TMPDIR_TEST/$scenario"
-    make_aux_verify_run "$run" "$scenario" metadata-only
+    make_aux_verify_run "$run" "$scenario" sidecar
     expect_failure env PYTHONPATH="$AUX_MCAP_MODULES" PATH="$AUX_VERIFY_BIN:$PATH" \
-        "$SCRIPT" verify "$run" --media-mode metadata-only
+        "$SCRIPT" verify "$run" --media-mode sidecar
     if [[ "$scenario" == bad_video_profile ]]; then
         grep -F 'differs from requested' "$run/verification_report.failed.txt" >/dev/null
     else
@@ -982,55 +1072,55 @@ expect_failure python3 "$(dirname "$SCRIPT")/tools/verify_profile.py" \
     "$AUX_VALID_RUN/requested_profile.json" hevc,1600,1300,60/1 h264,1600,1300,60/1
 
 AUX_RECONNECT_RUN="$TMPDIR_TEST/aux_reconnect"
-make_aux_verify_run "$AUX_RECONNECT_RUN" reconnect metadata-only
+make_aux_verify_run "$AUX_RECONNECT_RUN" reconnect sidecar
 PYTHONPATH="$AUX_MCAP_MODULES" PATH="$AUX_VERIFY_BIN:$PATH" \
-    "$SCRIPT" verify "$AUX_RECONNECT_RUN" --media-mode metadata-only >/dev/null 2>&1
+    "$SCRIPT" verify "$AUX_RECONNECT_RUN" --media-mode sidecar >/dev/null 2>&1
 
 AUX_EMPTY_IMU_RUN="$TMPDIR_TEST/aux_empty_imu"
-make_aux_verify_run "$AUX_EMPTY_IMU_RUN" empty_imu metadata-only
+make_aux_verify_run "$AUX_EMPTY_IMU_RUN" empty_imu sidecar
 set +e
 AUX_EMPTY_IMU_OUTPUT="$(PYTHONPATH="$AUX_MCAP_MODULES" PATH="$AUX_VERIFY_BIN:$PATH" \
-    "$SCRIPT" verify "$AUX_EMPTY_IMU_RUN" --media-mode metadata-only --expect-imu 2>&1)"
+    "$SCRIPT" verify "$AUX_EMPTY_IMU_RUN" --media-mode sidecar --expect-imu 2>&1)"
 AUX_EMPTY_IMU_STATUS=$?
 set -e
 [[ "$AUX_EMPTY_IMU_STATUS" -ne 0 ]]
 grep -F "contains an empty IMU batch" <<< "$AUX_EMPTY_IMU_OUTPUT" >/dev/null
 
 AUX_BAD_IMU_CADENCE_RUN="$TMPDIR_TEST/aux_bad_imu_cadence"
-make_aux_verify_run "$AUX_BAD_IMU_CADENCE_RUN" bad_imu_cadence metadata-only
+make_aux_verify_run "$AUX_BAD_IMU_CADENCE_RUN" bad_imu_cadence sidecar
 set +e
 AUX_BAD_IMU_CADENCE_OUTPUT="$(PYTHONPATH="$AUX_MCAP_MODULES" PATH="$AUX_VERIFY_BIN:$PATH" \
-    "$SCRIPT" verify "$AUX_BAD_IMU_CADENCE_RUN" --media-mode metadata-only --expect-imu 2>&1)"
+    "$SCRIPT" verify "$AUX_BAD_IMU_CADENCE_RUN" --media-mode sidecar --expect-imu 2>&1)"
 AUX_BAD_IMU_CADENCE_STATUS=$?
 set -e
 [[ "$AUX_BAD_IMU_CADENCE_STATUS" -ne 0 ]]
 grep -F "raw-device cadence is 500.000 Hz" <<< "$AUX_BAD_IMU_CADENCE_OUTPUT" >/dev/null
 
 AUX_SPARSE_AUDIO_RUN="$TMPDIR_TEST/aux_sparse_audio"
-make_aux_verify_run "$AUX_SPARSE_AUDIO_RUN" sparse_audio metadata-only
+make_aux_verify_run "$AUX_SPARSE_AUDIO_RUN" sparse_audio sidecar
 set +e
 AUX_SPARSE_AUDIO_OUTPUT="$(PYTHONPATH="$AUX_MCAP_MODULES" PATH="$AUX_VERIFY_BIN:$PATH" \
-    "$SCRIPT" verify "$AUX_SPARSE_AUDIO_RUN" --media-mode metadata-only --expect-audio 2>&1)"
+    "$SCRIPT" verify "$AUX_SPARSE_AUDIO_RUN" --media-mode sidecar --expect-audio 2>&1)"
 AUX_SPARSE_AUDIO_STATUS=$?
 set -e
 [[ "$AUX_SPARSE_AUDIO_STATUS" -ne 0 ]]
 grep -F "contains only" <<< "$AUX_SPARSE_AUDIO_OUTPUT" >/dev/null
 
 AUX_BAD_AUDIO_CADENCE_RUN="$TMPDIR_TEST/aux_bad_audio_cadence"
-make_aux_verify_run "$AUX_BAD_AUDIO_CADENCE_RUN" bad_audio_cadence metadata-only
+make_aux_verify_run "$AUX_BAD_AUDIO_CADENCE_RUN" bad_audio_cadence sidecar
 set +e
 AUX_BAD_AUDIO_CADENCE_OUTPUT="$(PYTHONPATH="$AUX_MCAP_MODULES" PATH="$AUX_VERIFY_BIN:$PATH" \
-    "$SCRIPT" verify "$AUX_BAD_AUDIO_CADENCE_RUN" --media-mode metadata-only --expect-audio 2>&1)"
+    "$SCRIPT" verify "$AUX_BAD_AUDIO_CADENCE_RUN" --media-mode sidecar --expect-audio 2>&1)"
 AUX_BAD_AUDIO_CADENCE_STATUS=$?
 set -e
 [[ "$AUX_BAD_AUDIO_CADENCE_STATUS" -ne 0 ]]
 grep -F "raw-device cadence is 24000.000 Hz" <<< "$AUX_BAD_AUDIO_CADENCE_OUTPUT" >/dev/null
 
 AUX_BAD_AUDIO_FORMAT_RUN="$TMPDIR_TEST/aux_bad_audio_format"
-make_aux_verify_run "$AUX_BAD_AUDIO_FORMAT_RUN" bad_audio_format metadata-only
+make_aux_verify_run "$AUX_BAD_AUDIO_FORMAT_RUN" bad_audio_format sidecar
 set +e
 AUX_BAD_AUDIO_FORMAT_OUTPUT="$(PYTHONPATH="$AUX_MCAP_MODULES" PATH="$AUX_VERIFY_BIN:$PATH" \
-    "$SCRIPT" verify "$AUX_BAD_AUDIO_FORMAT_RUN" --media-mode metadata-only --expect-audio 2>&1)"
+    "$SCRIPT" verify "$AUX_BAD_AUDIO_FORMAT_RUN" --media-mode sidecar --expect-audio 2>&1)"
 AUX_BAD_AUDIO_FORMAT_STATUS=$?
 set -e
 [[ "$AUX_BAD_AUDIO_FORMAT_STATUS" -ne 0 ]]
