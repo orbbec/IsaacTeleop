@@ -56,6 +56,7 @@ WITH_OAKD=true
 WITH_RTP=false
 WITH_ZED=false
 WITH_EGO=false
+WITH_ORBBEC_WRIST=false
 ORBBEC_SDK_DIR="${ORBBEC_SDK_ROOT:-}"
 ZED_SDK_DIR=/usr/local/zed
 # Skip the index probes and build isaaccapture from this checkout. Also the
@@ -79,6 +80,7 @@ while (( $# )); do
         --with-rtp)     WITH_RTP=true; shift;;
         --with-zed)     WITH_ZED=true; shift;;
         --with-ego)     WITH_EGO=true; shift;;
+        --with-orbbec-wrist)   WITH_ORBBEC_WRIST=true; shift;;
         --sdk-root)
             (( $# >= 2 )) || die "--sdk-root requires a directory"
             ORBBEC_SDK_DIR=$2; shift 2;;
@@ -97,6 +99,15 @@ if $WITH_EGO; then
     [[ -n "$ORBBEC_SDK_DIR" ]] || die "--with-ego requires --sdk-root or ORBBEC_SDK_ROOT"
     [[ -f "$ORBBEC_SDK_DIR/include/libobsensor/ObSensor.hpp" && -f "$ORBBEC_SDK_DIR/lib/libOrbbecSDK.so" ]] || die "invalid OrbbecSDK root: $ORBBEC_SDK_DIR"
 fi
+if $WITH_ORBBEC_WRIST; then
+    [[ -n "$ORBBEC_SDK_DIR" ]] || die "--with-orbbec-wrist requires --sdk-root or ORBBEC_SDK_ROOT"
+    [[ -f "$ORBBEC_SDK_DIR/include/libobsensor/ObSensor.hpp" && -f "$ORBBEC_SDK_DIR/lib/libOrbbecSDK.so" ]] || die "invalid Orbbec Wrist SDK root: $ORBBEC_SDK_DIR"
+fi
+
+# Keep camera validation and diagnostics separate; aggregate only shared codec dependencies.
+WITH_NATIVE_CODEC=$WITH_RTP
+$WITH_EGO && WITH_NATIVE_CODEC=true
+$WITH_ORBBEC_WRIST && WITH_NATIVE_CODEC=true
 
 # Select the toolkit CuPy will discover, without guessing from the driver.
 cuda_info=$(python3 "$HERE/check_cuda.py" --detect) || die "CUDA toolkit detection failed"
@@ -483,6 +494,7 @@ $WITH_OAKD && EXTRAS+=(oakd)
 $WITH_RTP  && EXTRAS+=(rtp)
 $WITH_ZED  && EXTRAS+=(zed)
 $WITH_EGO && EXTRAS+=(ego)
+$WITH_ORBBEC_WRIST && EXTRAS+=(orbbec_wrist)
 step "camera_viz setup — ${MODE} mode"
 note "venv    $VENV_DIR"
 note "python  $PYTHON_VERSION"
@@ -546,7 +558,7 @@ PKGS=("pyyaml>=6.0" "$target_cupy" "numpy>=1.23" "scipy>=1.15" "pillow>=10.0")
 $WITH_V4L2 && PKGS+=("opencv-python>=4.5")
 $WITH_OAKD && PKGS+=("depthai>=3.0")
 $WITH_RTP  && PKGS+=("pybind11>=2.11" "PyGObject>=3.42,<3.52")
-if $WITH_EGO && ! $WITH_RTP; then
+if $WITH_NATIVE_CODEC && ! $WITH_RTP; then
     PKGS+=("pybind11>=2.11")
 fi
 
@@ -599,7 +611,7 @@ fi
 
 # Native NVENC/NVDEC codec. Failures are non-fatal: the runtime falls
 # back to the GStreamer encoder when the native ``.so`` isn't importable.
-if $WITH_RTP || $WITH_EGO; then
+if $WITH_NATIVE_CODEC; then
     CODEC_DIR="$CAMERA_VIZ_DIR/codec"
     if [[ -d "$CODEC_DIR" ]]; then
         step "building native NVENC/NVDEC codec"
@@ -609,6 +621,9 @@ if $WITH_RTP || $WITH_EGO; then
             warn "codec build failed — falling back to the GStreamer encoder at runtime"
             if $WITH_EGO; then
                 warn "EGO H.264/H.265 requires the native decoder; use format: mjpg until it builds"
+            fi
+            if $WITH_ORBBEC_WRIST; then
+                warn "Orbbec Wrist H.264/H.265 requires the native decoder; use format: mjpg until it builds"
             fi
         fi
         deactivate
@@ -621,6 +636,14 @@ if $WITH_EGO; then
     # shellcheck disable=SC1091
     source "$VENV_DIR/bin/activate"
     "$CAMERA_VIZ_DIR/ego_preview/build.sh" --sdk-root "$ORBBEC_SDK_DIR"
+    deactivate
+fi
+
+if $WITH_ORBBEC_WRIST; then
+    step "building Orbbec Wrist capture"
+    # shellcheck disable=SC1091
+    source "$VENV_DIR/bin/activate"
+    "$CAMERA_VIZ_DIR/orbbec_wrist_preview/build.sh" --sdk-root "$ORBBEC_SDK_DIR"
     deactivate
 fi
 

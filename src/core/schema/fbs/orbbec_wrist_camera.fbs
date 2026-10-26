@@ -1,0 +1,52 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+include "timestamp.fbs";
+
+namespace core;
+
+enum OrbbecWristCameraStream : byte { Color = 0 }
+enum OrbbecWristPixelFormat : byte { Mjpg = 0, H264 = 1, H265 = 2 }
+
+// Local common-clock timestamps are retrieval-time proxies, not synchronized exposure times.
+table OrbbecWristFrameMetadata {
+  stream: OrbbecWristCameraStream (id: 0);
+  sequence_number: uint64 (id: 1);
+  width: uint32 (id: 2);
+  height: uint32 (id: 3);
+  fps: uint32 (id: 4);
+  pixel_format: OrbbecWristPixelFormat (id: 5);
+  encoded_bytes: uint64 (id: 6);
+  capture_epoch: uint32 (id: 7);
+  device_timestamp_us: uint64 (id: 8);
+  system_timestamp_us: uint64 (id: 9);
+  retrieved_monotonic_ns: int64 (id: 10);
+  discontinuity: bool (id: 11);
+  // Reserved for recordings that combined metadata and media; new writers use the media table.
+  encoded_data: [ubyte] (id: 12, deprecated);
+}
+
+table OrbbecWristFrameMetadataTracked { data: OrbbecWristFrameMetadata (id: 0); }
+table OrbbecWristFrameMetadataRecord {
+  data: OrbbecWristFrameMetadata (id: 0);
+  timestamp: DeviceDataTimestamp (id: 1);
+}
+
+// Encoded access unit kept separately from metadata.
+table OrbbecWristEncodedVideoFrame {
+  stream: OrbbecWristCameraStream (id: 0);
+  sequence_number: uint64 (id: 1);
+  width: uint32 (id: 2);
+  height: uint32 (id: 3);
+  fps: uint32 (id: 4);
+  pixel_format: OrbbecWristPixelFormat (id: 5);
+  encoded_data: [ubyte] (id: 6);
+  capture_epoch: uint32 (id: 7);
+}
+
+table OrbbecWristEncodedVideoFrameRecord {
+  data: OrbbecWristEncodedVideoFrame (id: 0);
+  timestamp: DeviceDataTimestamp (id: 1);
+}
+
+root_type OrbbecWristFrameMetadataRecord;

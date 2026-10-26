@@ -1,0 +1,36 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+include "timestamp.fbs";
+
+namespace core;
+
+enum OrbbecWristImuSensor : byte { Accel = 0, Gyro = 1 }
+
+struct OrbbecWristImuSample {
+  sequence_number: uint64;
+  x_si: double;
+  y_si: double;
+  z_si: double;
+  temperature_c: double;
+  device_timestamp_us: uint64;
+  system_timestamp_us: uint64;
+  retrieved_monotonic_ns: int64;
+  discontinuity: bool;
+}
+
+table OrbbecWristImuBatch {
+  sensor: OrbbecWristImuSensor (id: 0);
+  sample_rate_hz: uint32 (id: 1);
+  full_scale: uint32 (id: 2);
+  capture_epoch: uint32 (id: 3);
+  samples: [OrbbecWristImuSample] (id: 4);
+}
+
+table OrbbecWristImuBatchTracked { data: OrbbecWristImuBatch (id: 0); }
+table OrbbecWristImuBatchRecord {
+  data: OrbbecWristImuBatch (id: 0);
+  timestamp: DeviceDataTimestamp (id: 1);
+}
+
+root_type OrbbecWristImuBatchRecord;

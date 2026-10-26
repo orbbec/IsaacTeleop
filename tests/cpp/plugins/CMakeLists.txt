@@ -16,3 +16,7 @@ endif()
 if(BUILD_PLUGIN_EGO_CAMERA OR BUILD_EGO_MEDIA_TOOLS)
     add_subdirectory(ego)
 endif()
+
+if(BUILD_PLUGIN_ORBBEC_WRIST_CAMERA)
+    add_subdirectory(orbbec_wrist)
+endif()

@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# ./src/plugins/orbbec_wrist/orbbec_wrist.sh record --config ./src/plugins/orbbec_wrist/orbbec_wrist.example.toml --serial-number YOUR_WRIST_SERIAL
+# CLI options override this table. Relative paths use the calling working directory.
+[record]
+duration = 30
+format = "h264"
+# Video resolution is fixed at 1600x1200.
+fps = 30
+imu = true
+imu_rate = 400
+accel_full_scale = 24
+startup_timeout_ms = 5000
+stall_timeout_ms = 3000
+reconnect_timeout_ms = 30000
+reconnect_interval_ms = 1000
+media_mode = "sidecar"
+keep_media_sidecars = false
+require_calibration = false
+preview = false
+
+# serial_number = "YOUR_WRIST_SERIAL"
+# output = "recordings/wrist_left"
+# sdk_root = "/absolute/path/to/OrbbecSDK"
+# preset = "py3.11"
+# plugin = "/absolute/path/to/orbbec_wrist_camera_plugin"
+# Requires the Isaac Capture OpenXR runtime; use distinct IDs for each wrist.
+# collection_prefix = "wrist/left"
+# plugin_root_id = "wrist_left"
+
+# Optional additional fragment for TeleopSession merging; requires media_mode = "embedded".
+# mcap_media_spool = "/absolute/path/to/orbbec_wrist_left.fragment.mcap"

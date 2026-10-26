@@ -29,6 +29,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+orbbec-wrist = [
+    "mcap>=1.2,<2",
+]
 ego = [
     "mcap>=1.2,<2",
 ]

@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+source: local
+
+display:
+  mode: window
+  window:
+    width: 1200
+    height: 900
+  placements:
+    orbbec_wrist:
+      lock_mode: world
+      size: [1.0, 0.75]
+
+cameras:
+  - name: orbbec_wrist
+    enabled: true
+    type: orbbec_wrist
+    serial_number: ""  # Required when multiple Orbbec Wrist cameras are connected.
+    width: 1600
+    height: 1200
+    fps: 30
+    format: h264
+    gpu_id: 0  # Follow the renderer's CUDA GPU.

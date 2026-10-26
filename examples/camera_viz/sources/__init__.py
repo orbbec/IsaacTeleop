@@ -20,6 +20,7 @@ from .rtp_h264 import RtpH264Source
 from .synthetic import SyntheticSource, SyntheticStereoSource
 from .v4l2 import V4l2Source
 from .video_file import VideoFileSource
+from .orbbec_wrist import OrbbecWristSource
 from .zed import ZedSource
 
 __all__ = [
@@ -31,6 +32,7 @@ __all__ = [
     "SyntheticStereoSource",
     "V4l2Source",
     "VideoFileSource",
+    "OrbbecWristSource",
     "ZedSource",
     "build_local_camera",
     "resolve_video_paths",
@@ -140,6 +142,21 @@ def build_local_camera(
                 renderer_cuda_device_id=renderer_cuda_device_id,
             )
         ]
+    if kind == "orbbec_wrist":
+        if stereo:
+            raise ValueError("Orbbec Wrist produces one mono Color stream")
+        return [
+            OrbbecWristSource(
+                name=name,
+                serial_number=str(spec.get("serial_number", "")),
+                width=int(spec.get("width", 1600)),
+                height=int(spec.get("height", 1200)),
+                fps=int(spec.get("fps", 30)),
+                format=spec.get("format", "h264"),
+                gpu_id=int(spec.get("gpu_id", 0)),
+                renderer_cuda_device_id=renderer_cuda_device_id,
+            )
+        ]
     if kind == "video":
         # Stereo (side-by-side file) emits both eyes from one source, like
         # SyntheticStereoSource — viewer-only; camera_streamer's
@@ -177,5 +194,5 @@ def build_local_camera(
         return eyes
     raise ValueError(
         f"build_local_camera: unknown camera type {kind!r} "
-        "(known: synthetic, v4l2, oakd, ego, zed, video)"
+        "(known: synthetic, v4l2, oakd, ego, orbbec_wrist, zed, video)"
     )

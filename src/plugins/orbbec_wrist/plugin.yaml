@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: orbbec_wrist_camera
+description: "Orbbec Wrist single Color video and IMU plugin; external Orbbec SDK required"
+command: "./orbbec_wrist_camera_plugin"
+version: "1.0.0"
+devices:
+  - path: "/camera/wrist"
+    type: "camera"
+    description: "Orbbec Wrist Color, Accel and Gyro"

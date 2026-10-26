@@ -398,7 +398,7 @@ camera_viz.sh — local development + Jetson deployment for camera_viz
 LOCAL
     setup [--venv PATH] [--sender-only] [--jetson]
           [--no-v4l2] [--no-oakd] [--with-rtp] [--with-zed]
-          [--with-ego --sdk-root PATH]
+          [--with-ego] [--with-orbbec-wrist] [--sdk-root PATH]
           [--wheel PATH | --build-from-source]
                           Create .venv, install Python deps via uv into
                           the venv, build native codec. Python deps stay

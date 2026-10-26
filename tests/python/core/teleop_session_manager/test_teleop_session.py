@@ -1642,6 +1642,7 @@ class TestStatusMonitoringIntegration:
         [
             ("manus_hand_plugin", "/manus", "/hand/left"),
             ("orbbec_ego_camera", "ego_instance", "/camera/ego"),
+            ("orbbec_wrist_camera", "wrist_instance", "/camera/wrist"),
         ],
     )
     def test_supported_inventory_preserves_plugin_launch_order(

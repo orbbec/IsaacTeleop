@@ -21,6 +21,7 @@ SPDX-License-Identifier: Apache-2.0
 | `oakd`      | OAK-D RGB / LEFT / RIGHT; mono or `stereo: true` (GRAY8 over USB, GPU-broadcast to RGBA; `stereo_rgb` for color). Needs the Luxonis udev rule — see below |
 | `zed`       | ZED 2 / Mini / X One; mono or `stereo: true` (per-eye SDK retrieve, zero-copy GPU) |
 | `ego` | Local EGO ColorLeft/ColorRight pair; `stereo: true` required. See the [EGO preview guide](../../src/plugins/ego/README.md#preview-and-gpu-stereo) |
+| `orbbec_wrist` | Orbbec Wrist mono Color, fixed 1600×1200; select by `serial_number` when several are connected. |
 | `video`     | Video-file replay (anything OpenCV/FFmpeg reads) — preview / testing without a camera. Loops by default; `stereo: true` splits side-by-side files into eyes (viewer only) |
 
 In XR mode the viewer **attaches to the CloudXR runtime + WSS proxy**, starting a background service if none is serving — nothing to start separately (`--accept-eula` for the first run; CloudXR.js is hosted at `https://<host>:48322/client/` by default when this run starts the service — `--no-host-client` only applies then; stop and restart the service to change hosting; `camera_viz.py --help` for the rest). Output: XR headset (default) or desktop window (`run CONFIG --mode window`); one surface per camera — a flat plane (default), a cylinder arc, or an equirect sphere (`placements.<name>.shape`, XR only for the curved shapes). Stereo cameras render true SBS in XR; window mode shows the left eye. XR placements: `world` / `head` / `lazy` / `gimbal`.
@@ -38,7 +39,7 @@ source examples/camera_viz/.venv/bin/activate
 
 camera_viz needs an `isaaccapture` new enough to carry the features it uses, so `setup` works down a ladder to get one: newest **final release** meeting that minimum; else newest **release candidate** (an rc is published from every release-branch commit, and PEP 440 keeps pre-releases out of a plain minimum-version specifier); else a **source build** of this checkout, after asking. Final releases win automatically whenever one qualifies. The minimum itself lives in `scripts/_install_deps.sh`.
 
-Flags: `--no-{v4l2,oakd}`, `--with-rtp` (split mode / `loopback`; implied by `--sender-only`), `--with-zed`, `--with-ego --sdk-root PATH`, `--sender-only`, `--jetson`. Pass `--venv PATH` to install into an existing venv (symlinks `.venv` → PATH so `run` / `loopback` pick it up too).
+Flags: `--no-{v4l2,oakd}`, `--with-rtp` (split mode / `loopback`; implied by `--sender-only`), `--with-zed`, `--with-ego --sdk-root PATH`, `--with-orbbec-wrist --sdk-root PATH`, `--sender-only`, `--jetson`. Pass `--venv PATH` to install into an existing venv (symlinks `.venv` → PATH so `run` / `loopback` pick it up too).
 
 > **OAK-D?** The camera needs a udev rule, or `depthai` reports `Insufficient permissions to communicate with X_LINK_UNBOOTED device` and never finds it. `setup` prompts to install one when an OAK-D is attached and no rule covers it; declining is not fatal. By hand:
 > ```bash
@@ -57,7 +58,7 @@ Flags: `--no-{v4l2,oakd}`, `--with-rtp` (split mode / `loopback`; implied by `--
 ./camera_viz.sh run configs/v4l2.yaml --mode window    # desktop window instead
 ```
 
-Set `source: local`. Swap config for `oakd.yaml`, `zed.yaml`, `ego.yaml`, `realsense.yaml`, `synthetic.yaml`, `synthetic_stereo.yaml`, `synthetic_xr_3up.yaml`, `multi_camera.yaml`, `replay.yaml` (file replay — point `path:` at any recording).
+Set `source: local`. Swap config for `oakd.yaml`, `zed.yaml`, `ego.yaml`, `orbbec_wrist.yaml`, `realsense.yaml`, `synthetic.yaml`, `synthetic_stereo.yaml`, `synthetic_xr_3up.yaml`, `multi_camera.yaml`, `replay.yaml` (file replay — point `path:` at any recording).
 
 For stereo sources, window mode shows the left eye by default. Use
 `--stereo-debug sbs` to show both eyes side by side. Set
@@ -131,7 +132,7 @@ encoder: auto | native | gstreamer
 cameras:
   - name: cam
     enabled: true
-    type: v4l2                # v4l2 | oakd | zed | ego | synthetic | video
+    type: v4l2                # v4l2 | oakd | zed | ego | orbbec_wrist | synthetic | video
     width: 2560               # video: optional — defaults to the file's size
     height: 720
     fps: 30
