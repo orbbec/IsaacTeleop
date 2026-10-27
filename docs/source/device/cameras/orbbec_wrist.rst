@@ -42,7 +42,7 @@ selected physical camera.
 Audio, depth, IR, and raw image output are not provided. Profiles must be
 advertised by the connected device; unsupported requests fail without profile
 fallback. Width and height overrides are rejected. The accepted 16 g request
-also requires device support; the tested camera did not advertise it.
+also requires device support.
 
 Installation
 ------------
@@ -223,7 +223,7 @@ add the camera alongside its other devices:
        plugin_root_id="orbbec_wrist_left",
        search_paths=[Path("build-wrist-py3.11/src/plugins").resolve()],
        required=True,
-       shutdown_timeout_seconds=15.0,
+       shutdown_timeout_seconds=5.0,
        plugin_args=[
            "--serial-number=YOUR_SERIAL",
            "--collection-prefix=orbbec_wrist/left",
@@ -245,11 +245,15 @@ capture metadata, IMU, calibration, and other session trackers. Inputs remain
 available. Existing final, intermediate, fragment, or matching ``.partial``
 paths are rejected; missing or unclean fragments prevent finalization.
 
+The example sets a 5-second shutdown grace period for this Wrist instance; the
+framework default remains 2 seconds. This allows time for camera shutdown and
+recording cleanup and requires the configurable shutdown timeout API. Forced
+termination can leave an uncommitted ``.partial`` fragment and prevent finalization.
+
 For a second camera, add another plugin and tracker group with a distinct
 serial, root ID, collection prefix, and recording names. Map both root IDs to
 separate fragment paths. One process opens one camera. This does not synchronize
-the two cameras. Real multi-device/OpenXR acceptance remains pending; current
-automated session and merger tests do not establish hardware integration.
+the two cameras.
 
 Availability monitoring
 -----------------------
@@ -296,28 +300,23 @@ Set ``serial_number`` in
 :code-file:`examples/camera_viz/configs/orbbec_wrist.yaml` when several cameras
 are connected. The viewer and plugin each open the camera; run them one at a
 time. See :code-file:`examples/camera_viz/README.md` for GPU and decoder setup.
-Close the viewer window or use Ctrl-C to exit; Escape handling has an unresolved
-test failure in this viewer.
+Close the viewer window or use Ctrl-C to exit.
 
 Timestamp and calibration limits
 --------------------------------
 
 Device timestamps and host arrival times are preserved separately. Session
 polling times and MCAP log times do not establish physical camera/IMU
-synchronization. Tests observed IMU sequence gaps and intermittent device-clock
-forward jumps; a successful delivery verification does not establish zero loss
-or detect every clock anomaly.
+synchronization. IMU sequence gaps and intermittent device-clock forward jumps
+can occur. Discontinuity flags and delivery verification do not detect every
+clock anomaly. Inspect sequence and timestamp continuity separately; a
+verification pass does not establish zero loss or synchronized sampling.
 
 Calibration export preserves SDK fields and raw YAML with availability errors.
-The tested camera did not expose structured Color intrinsics, including with
-SDK 2.10.6. Use ``verify "$RUN" --require-calibration`` when complete structured
-Color calibration and raw YAML are required; the tested device fails this check.
+Structured Color intrinsics may be unavailable even when raw YAML is readable.
+Use ``verify "$RUN" --require-calibration`` when complete structured Color
+calibration and raw YAML are required; this check fails if required fields are missing.
 Do not treat the presence of ``calibration.json`` as proof of complete calibration.
-
-SDK 2.10.6 was built in a fresh directory and used for a ten-second capture on
-WristCam-L firmware 1.1.8. This does not cover long-duration reliability or all
-profiles. For validation scope and remaining acceptance work, see the development
-validation section in the :code-file:`plugin README <src/plugins/orbbec_wrist/README.md>`.
 
 Troubleshooting
 ---------------

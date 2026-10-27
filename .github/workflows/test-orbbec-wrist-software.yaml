@@ -1,0 +1,107 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Test Orbbec Wrist Software
+
+on:
+  push:
+    branches: [main, 'release/*.*.x']
+    paths: &wrist_paths
+    - '.github/workflows/test-orbbec-wrist-software.yaml'
+    - '.github/actions/setup-uv/**'
+    - 'CMakeLists.txt'
+    - 'pyproject.toml'
+    - 'cmake/**'
+    - 'deps/**'
+    - 'src/CMakeLists.txt'
+    - 'src/core/**'
+    - 'src/plugins/CMakeLists.txt'
+    - 'src/plugins/orbbec_wrist/**'
+    - 'src/plugins/plugin_utils/**'
+    - 'src/python/**'
+    - 'src/compat/**'
+    - 'tests/CMakeLists.txt'
+    - 'tests/cpp/CMakeLists.txt'
+    - 'tests/cpp/core/**'
+    - 'tests/cpp/plugins/CMakeLists.txt'
+    - 'tests/cpp/plugins/orbbec_wrist/**'
+    - 'tests/python/CMakeLists.txt'
+    - 'tests/python/core/CMakeLists.txt'
+    - 'tests/python/core/orbbec_wrist/**'
+    - 'tests/python/repo_paths.py'
+  pull_request:
+    paths: *wrist_paths
+  workflow_dispatch:
+
+concurrency:
+  group: wrist-software-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  test-orbbec-wrist-software:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    env:
+      WRIST_BUILD_DIR: ${{ github.workspace }}/build-wrist-py3.11
+      UV_CACHE_DIR: /tmp/isaaccapture-wrist-uv-cache
+
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        persist-credentials: false
+
+    - name: Install pinned uv
+      uses: ./.github/actions/setup-uv
+
+    - name: Install build dependencies and pinned Wrist SDK
+      shell: bash
+      run: |
+        set -euo pipefail
+        env -u ORBBEC_SDK_ROOT -u PYTHONPATH -u AMENT_PREFIX_PATH -u COLCON_PREFIX_PATH \
+          ./src/plugins/orbbec_wrist/install.sh --skip-udev --preview --preset py3.11 --jobs 4
+
+    - name: Build SDK backend and software tests
+      shell: bash
+      run: |
+        set -euo pipefail
+        env -u PYTHONPATH -u AMENT_PREFIX_PATH -u COLCON_PREFIX_PATH \
+          cmake -S . -B "${WRIST_BUILD_DIR}" \
+          -DISAAC_TELEOP_PYTHON_VERSION=3.11 \
+          -DBUILD_VIZ=OFF \
+          -DBUILD_EXAMPLES=OFF \
+          -DBUILD_TESTING=ON \
+          -DBUILD_PYTHON_BINDINGS=ON \
+          -DBUILD_PLUGINS=ON \
+          -DBUILD_PLUGIN_EGO_CAMERA=OFF \
+          -DBUILD_PLUGIN_ORBBEC_WRIST_CAMERA=ON \
+          -DORBBEC_WRIST_ENABLE_PREVIEW=ON
+        cmake --build "${WRIST_BUILD_DIR}" --parallel 4 --target \
+          orbbec_wrist_camera_plugin wrist_camera_tests live_trackers_tests schema_tests
+
+    - name: Run hardware-free Wrist C++ and CLI tests
+      shell: bash
+      run: |
+        set -euo pipefail
+        env -u PYTHONPATH -u AMENT_PREFIX_PATH -u COLCON_PREFIX_PATH \
+          ctest --test-dir "${WRIST_BUILD_DIR}" --output-on-failure --parallel 4 \
+          --no-tests=error -R '[Ww][Rr][Ii][Ss][Tt]' -E '_python$'
+
+    - name: Run Wrist recording and session Python tests
+      shell: bash
+      run: |
+        set -euo pipefail
+        env -u PYTHONPATH -u AMENT_PREFIX_PATH -u COLCON_PREFIX_PATH \
+          ctest --test-dir "${WRIST_BUILD_DIR}" --output-on-failure --parallel 4 \
+          --no-tests=error -R '^wrist_.*_python$'
+
+    - name: Upload CTest failure logs
+      if: failure()
+      uses: actions/upload-artifact@v6
+      with:
+        name: wrist-software-ctest-logs
+        path: ${{ env.WRIST_BUILD_DIR }}/Testing/Temporary
+        if-no-files-found: warn
+        retention-days: 14
