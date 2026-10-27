@@ -12,6 +12,17 @@ set_tests_properties(mcap_record_replay_ego PROPERTIES
     LABELS "mcap_record_replay"
 )
 
+add_test(
+    NAME mcap_record_replay_orbbec_wrist
+    COMMAND uv run --python ${ISAAC_TELEOP_PYTHON_VERSION} --extra dev
+        pytest -v --tb=short test_orbbec_wrist_replay.py
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+set_tests_properties(mcap_record_replay_orbbec_wrist PROPERTIES
+    ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python_package/$<CONFIG>"
+    LABELS "mcap_record_replay;wrist"
+)
+
 foreach(test_file test_ego_sync_cli test_ego_calibration_cli)
     add_test(
         NAME mcap_record_replay_${test_file}
