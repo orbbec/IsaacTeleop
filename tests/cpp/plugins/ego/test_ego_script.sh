@@ -15,6 +15,20 @@ expect_failure() {
     fi
 }
 
+expect_failure_message() {
+    local expected="$1"
+    shift
+    local output
+    if output="$("$@" 2>&1)"; then
+        echo "Expected command to fail: $*" >&2
+        exit 1
+    fi
+    if ! grep -F -- "$expected" <<< "$output" >/dev/null; then
+        printf 'Expected failure containing %s: %s\n%s\n' "$expected" "$*" "$output" >&2
+        exit 1
+    fi
+}
+
 "$SCRIPT" --help >/dev/null
 expect_failure "$SCRIPT" doctor --sdk-root "$TMPDIR_TEST/missing-sdk"
 expect_failure "$SCRIPT" build --sdk-root "$TMPDIR_TEST/missing-sdk" --preset invalid
@@ -62,6 +76,7 @@ if grep -Eq '^--enable-audio$|^--audio-output=' "$MOCK_ARGS"; then
     exit 1
 fi
 grep -Fx -- "--mcap-filename=$RUN/metadata.mcap" "$MOCK_ARGS" >/dev/null
+grep -Fx -- "--mcap-media=sidecar" "$MOCK_ARGS" >/dev/null
 grep -Fx -- "--reconnect-timeout=30" "$MOCK_ARGS" >/dev/null
 grep -Fx -- "--reconnect-interval-ms=1000" "$MOCK_ARGS" >/dev/null
 grep -Fx -- "--bitrate=8" "$MOCK_ARGS" >/dev/null
@@ -133,6 +148,27 @@ AUDIO_RUN="$TMPDIR_TEST/audio_recording"
 expect_failure "$SCRIPT" record --plugin "$MOCK_PLUGIN" --duration 1 --output "$AUDIO_RUN" --audio
 grep -Fx -- "--audio-output=$AUDIO_RUN/Audio.wav" "$MOCK_ARGS" >/dev/null
 
+SIDECAR_RUN="$TMPDIR_TEST/sidecar_recording"
+expect_failure "$SCRIPT" record --plugin "$MOCK_PLUGIN" --duration 1 \
+    --output "$SIDECAR_RUN" --mcap-media sidecar
+grep -Fx -- "--mcap-media=sidecar" "$MOCK_ARGS" >/dev/null
+grep -F -- "output=$SIDECAR_RUN/raw/ColorLeft.h264" "$MOCK_ARGS" >/dev/null
+grep -F -- "output=$SIDECAR_RUN/raw/ColorRight.h264" "$MOCK_ARGS" >/dev/null
+
+for invalid_mode in metadata-only invalid; do
+    invalid_run="$TMPDIR_TEST/invalid_cli_$invalid_mode"
+    expect_failure_message "--mcap-media must be sidecar or embedded" \
+        "$SCRIPT" record --plugin "$MOCK_PLUGIN" --duration 1 \
+        --output "$invalid_run" --mcap-media "$invalid_mode"
+    [[ ! -e "$invalid_run" ]]
+    for override_mode in sidecar embedded; do
+        expect_failure_message "--mcap-media must be sidecar or embedded" \
+            "$SCRIPT" record --plugin "$MOCK_PLUGIN" --duration 1 \
+            --output "$invalid_run" --mcap-media "$invalid_mode" --mcap-media "$override_mode"
+        [[ ! -e "$invalid_run" ]]
+    done
+done
+
 CONFIG_RUN="$TMPDIR_TEST/config_recording"
 CONFIG_FILE="$TMPDIR_TEST/record.toml"
 cat > "$CONFIG_FILE" <<EOF
@@ -196,6 +232,30 @@ EOF
 expect_failure "$SCRIPT" record --config "$INVALID_CONFIG"
 expect_failure "$SCRIPT" record --config "$TMPDIR_TEST/missing.toml"
 
+SIDECAR_CONFIG="$TMPDIR_TEST/sidecar.toml"
+SIDECAR_CONFIG_RUN="$TMPDIR_TEST/sidecar_config_recording"
+printf '[record]\nmcap_media = "sidecar"\n' > "$SIDECAR_CONFIG"
+expect_failure "$SCRIPT" record --config "$SIDECAR_CONFIG" --plugin "$MOCK_PLUGIN" \
+    --duration 1 --output "$SIDECAR_CONFIG_RUN" --audio
+grep -Fx -- "--mcap-media=sidecar" "$MOCK_ARGS" >/dev/null
+grep -Fx -- "--audio-output=$SIDECAR_CONFIG_RUN/Audio.wav" "$MOCK_ARGS" >/dev/null
+
+for invalid_mode in metadata-only invalid; do
+    invalid_config="$TMPDIR_TEST/invalid_config_$invalid_mode.toml"
+    printf '[record]\nmcap_media = "%s"\n' "$invalid_mode" > "$invalid_config"
+    for override_mode in none sidecar embedded; do
+        invalid_run="$TMPDIR_TEST/invalid_config_${invalid_mode}_$override_mode"
+        override_args=()
+        if [[ "$override_mode" != none ]]; then
+            override_args=(--mcap-media "$override_mode")
+        fi
+        expect_failure_message "mcap_media must be sidecar or embedded" \
+            "$SCRIPT" record --config "$invalid_config" --plugin "$MOCK_PLUGIN" \
+            --duration 1 --output "$invalid_run" "${override_args[@]}"
+        [[ ! -e "$invalid_run" ]]
+    done
+done
+
 SIGNAL_PLUGIN="$TMPDIR_TEST/signal_plugin"
 cat > "$SIGNAL_PLUGIN" <<'EOF'
 #!/usr/bin/env bash
@@ -218,7 +278,8 @@ set -e
 grep -F "Capture failed with status 7" <<< "$SIGNAL_OUTPUT" >/dev/null
 
 RUN_EMBEDDED="$TMPDIR_TEST/embedded"
-expect_failure "$SCRIPT" record --plugin "$MOCK_PLUGIN" --duration 1 --output "$RUN_EMBEDDED" --mcap-media embedded
+expect_failure "$SCRIPT" record --plugin "$MOCK_PLUGIN" --duration 1 --output "$RUN_EMBEDDED" \
+    --mcap-media sidecar --mcap-media embedded
 grep -Fx -- "--mcap-media=embedded" "$MOCK_ARGS" >/dev/null
 if grep -Eq '^--enable-audio$|^--audio-output=' "$MOCK_ARGS"; then
     echo "Default embedded capture must not request audio" >&2
@@ -281,11 +342,78 @@ if [[ "$1" == */stream_inventory.py ]]; then
 fi
 exit 0
 EOF
+cat > "$MOCK_BIN/lsusb" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' \
+    'Bus 999 Device 001: ID 2bc5:1204 EGOPro' \
+    'Bus 999 Device 002: ID 2bc5:9999 other-orbbec-device'
+EOF
+chmod +x "$MOCK_BIN/lsusb"
+
+# Exercise both vendor callback layouts and reject a structurally valid ordinary SDK.
+SDK_FIXTURE="$TMPDIR_TEST/sdk"
+mkdir -p "$SDK_FIXTURE/include/libobsensor/hpp" "$SDK_FIXTURE/lib/extensions"
+touch "$SDK_FIXTURE/lib/OrbbecSDKConfig.cmake" "$SDK_FIXTURE/lib/libOrbbecSDK.so.2"
+for layout in legacy acquisition ordinary; do
+    cat > "$SDK_FIXTURE/include/libobsensor/ObSensor.hpp" <<'EOF'
+#pragma once
+#include <functional>
+enum OBPropertyID { property_id };
+enum OBDataTranState { transfer_state };
+struct OBDataChunk {};
+struct OBEgoStateReport {};
+namespace ob {
+class AudioStreamProfile { public: unsigned getSampleRate() const; };
+class Device {
+public:
+    void getRawData(OBPropertyID, std::function<void(OBDataTranState, OBDataChunk*)>) const;
+EOF
+    case "$layout" in
+        legacy)
+            echo 'void setEgoStateCallback(std::function<void(const OBEgoStateReport&)>);' \
+                >> "$SDK_FIXTURE/include/libobsensor/ObSensor.hpp"
+            ;;
+        acquisition)
+            cat > "$SDK_FIXTURE/include/libobsensor/hpp/DataAcquisitionDevice.hpp" <<'EOF'
+#pragma once
+namespace ob {
+class DataAcquisitionDevice : public Device {
+public:
+    void setEgoStateCallback(std::function<void(const OBEgoStateReport&)>);
+};
+}
+EOF
+            ;;
+        ordinary)
+            rm "$SDK_FIXTURE/include/libobsensor/hpp/DataAcquisitionDevice.hpp"
+            ;;
+    esac
+    echo '}; }' >> "$SDK_FIXTURE/include/libobsensor/ObSensor.hpp"
+    if [[ "$layout" == acquisition ]]; then
+        echo '#include "hpp/DataAcquisitionDevice.hpp"' >> "$SDK_FIXTURE/include/libobsensor/ObSensor.hpp"
+    fi
+    if [[ "$layout" == ordinary ]]; then
+        if PATH="$MOCK_BIN:$PATH" "$PACKAGE_DIR/ego.sh" doctor --sdk-root "$SDK_FIXTURE" \
+                > "$TMPDIR_TEST/sdk_failure.log" 2>&1; then
+            echo 'Ordinary SDK without EGO callbacks must fail doctor' >&2
+            exit 1
+        fi
+        grep -F 'SDK lacks the required EGO APIs' "$TMPDIR_TEST/sdk_failure.log" >/dev/null
+        grep -F 'v2.10.6-EGO-20261019' "$TMPDIR_TEST/sdk_failure.log" >/dev/null
+    else
+        CXX='c++ -O2' PATH="$MOCK_BIN:$PATH" "$PACKAGE_DIR/ego.sh" doctor --sdk-root "$SDK_FIXTURE" >/dev/null
+    fi
+done
 
 PACKAGE_RUN="$TMPDIR_TEST/package_run"
 mkdir -p "$PACKAGE_RUN"
 printf '\0' > "$PACKAGE_RUN/metadata.mcap"
-PATH="$MOCK_BIN:$PATH" "$PACKAGE_DIR/ego.sh" doctor >/dev/null
+PATH="$MOCK_BIN:$PATH" "$PACKAGE_DIR/ego.sh" doctor > "$TMPDIR_TEST/doctor.log" 2>&1
+grep -F 'ID 2bc5:1204 EGOPro' "$TMPDIR_TEST/doctor.log" >/dev/null
+if grep -F 'other-orbbec-device' "$TMPDIR_TEST/doctor.log" >/dev/null; then
+    echo 'Doctor must only report supported EGO/EGOPRO USB devices' >&2
+    exit 1
+fi
 PATH="$MOCK_BIN:$PATH" "$PACKAGE_DIR/ego.sh" export-media "$PACKAGE_RUN" >/dev/null
 test -f "$PACKAGE_RUN/exported/ColorLeft.h264"
 expect_failure env PATH="$MOCK_BIN:$PATH" "$PACKAGE_DIR/ego.sh" export-media "$PACKAGE_RUN"
@@ -515,12 +643,172 @@ def _pcm_audio(sequence, timestamp, sample_count, pcm_bytes=None, sample_format=
     return bytes(data)
 
 
+def _diagnostic(timestamp):
+    data, table = _record([4, 0, 8, 16, 20, 24], 28, timestamp)
+    struct.pack_into("<qIB", data, table + 8, timestamp, 2, 4)
+    uid = len(data)
+    data.extend(struct.pack("<I", 3) + b"ego\0")
+    struct.pack_into("<I", data, table + 4, uid - (table + 4))
+    data.extend(struct.pack("<HHi", 4, 4, 4))
+    struct.pack_into("<I", data, table + 24, len(data) - 4 - (table + 24))
+    return bytes(data)
+
+
+def calibration_value(scenario="valid", height=1300):
+    camera = {
+        "width": 1600, "height": height, "fx": 500.25, "fy": 501.5,
+        "cx": 800.0, "cy": 650.0, "distortion_model": 5,
+        "distortion": [0.01, -0.02, 0.0, 0.0],
+    }
+    extrinsics = {"rotation": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                  "translation_mm": [10.0, 20.0, 30.0]}
+    value = {
+        "device_uid": "ego", "color_left": dict(camera), "color_right": dict(camera),
+        "left_to_right": dict(extrinsics), "accel_to_left": dict(extrinsics),
+        "gyro_to_left": dict(extrinsics), "raw_alignment_yaml": "camera calibration",
+        "raw_imu_yaml": "IMU calibration",
+    }
+    if scenario == "calibration_missing":
+        value["gyro_to_left"] = None
+    elif scenario == "calibration_bad_rotation":
+        value["gyro_to_left"]["rotation"] = [0.0] * 9
+    elif scenario == "calibration_reflection":
+        value["gyro_to_left"]["rotation"] = [-1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+    elif scenario == "calibration_bad_translation":
+        value["gyro_to_left"]["translation_mm"] = [1.0, 2.0]
+    elif scenario == "calibration_nonfinite":
+        value["gyro_to_left"]["translation_mm"] = [float("nan"), 0.0, 0.0]
+    elif scenario == "calibration_bad_dimensions":
+        value["color_left"]["width"] = 640
+    elif scenario == "calibration_bad_focal":
+        value["color_left"]["fx"] = 0.0
+    if scenario.startswith(("quad_calibration", "stereo_calibration")):
+        value["video_streams"] = [
+            {"stream": index, "reference_stream": 0, "intrinsics": dict(camera),
+             "to_reference": dict(extrinsics) if index else None,
+             "intrinsics_source": "fixture", "extrinsics_source": "fixture" if index else "reference_stream",
+             "intrinsics_error": "", "extrinsics_error": ""}
+            for index in range(4 if scenario.startswith("quad_") else 2)
+        ]
+        if scenario == "quad_calibration_missing_side":
+            value["video_streams"].pop()
+        elif scenario == "quad_calibration_missing_intrinsics":
+            value["video_streams"][2]["intrinsics"] = None
+        elif scenario == "quad_calibration_bad_rotation":
+            value["video_streams"][2]["to_reference"]["rotation"] = [0.0] * 9
+        elif scenario == "quad_calibration_wrong_reference":
+            value["video_streams"][3]["reference_stream"] = 3
+        elif scenario == "stereo_calibration_missing_legacy":
+            value["left_to_right"] = None
+    return value
+
+
+def _append_table(data, count):
+    vtable = len(data)
+    vtable_size = 4 + 2 * count
+    table = (vtable + vtable_size + 3) & ~3
+    object_size = 4 + 4 * count
+    data.extend(b"\0" * (table + object_size - len(data)))
+    struct.pack_into("<" + "H" * (2 + count), data, vtable,
+                     vtable_size, object_size, *(4 + 4 * i for i in range(count)))
+    struct.pack_into("<i", data, table, table - vtable)
+    return table
+
+
+def _append_vector(data, position, values, fmt):
+    vector = len(data)
+    struct.pack_into("<I", data, position, vector - position)
+    data.extend(struct.pack("<I", len(values)))
+    data.extend(struct.pack("<" + fmt * len(values), *values))
+
+
+def calibration_json_value(scenario="valid", height=1300):
+    value = calibration_value(scenario, height)
+    names = ("ColorLeft", "ColorRight", "ColorSideLeft", "ColorSideRight")
+    for entry in value.get("video_streams", []):
+        entry["stream"] = names[entry["stream"]]
+        entry["reference_stream"] = names[entry["reference_stream"]]
+    return value
+
+
+def _calibration(scenario, epoch=0, height=1300):
+    value = calibration_value(scenario, height)
+    data, table = _record([4, 8, 12, 16, 0, 0, 20, 24, 28, 32, 36, 0, 40], 44, 1_000_000_000)
+    struct.pack_into("<I", data, table + 36, epoch)
+    for key, field in (("device_uid", 4), ("raw_alignment_yaml", 28), ("raw_imu_yaml", 32)):
+        _append_vector(data, table + field, value[key].encode(), "B")
+    for key, offset in (("color_left", 8), ("color_right", 12), ("left_to_right", 16),
+                        ("accel_to_left", 20), ("gyro_to_left", 24)):
+        item = value[key]
+        if item is None:
+            struct.pack_into("<H", data, table - struct.unpack_from("<i", data, table)[0] +
+                             4 + 2 * {8: 1, 12: 2, 16: 3, 20: 6, 24: 7}[offset], 0)
+            continue
+        nested = _append_table(data, 8 if key.startswith("color_") else 2)
+        struct.pack_into("<I", data, table + offset, nested - table - offset)
+        if key.startswith("color_"):
+            for index, name in enumerate(("width", "height", "fx", "fy", "cx", "cy", "distortion_model")):
+                fmt = "I" if index < 2 else "i" if index == 6 else "f"
+                struct.pack_into("<" + fmt, data, nested + 4 + 4 * index, item[name])
+            _append_vector(data, nested + 32, item["distortion"], "f")
+        else:
+            _append_vector(data, nested + 4, item["rotation"], "f")
+            _append_vector(data, nested + 8, item["translation_mm"], "f")
+    entries = value.get("video_streams", [])
+    if not entries:
+        vtable = table - struct.unpack_from("<i", data, table)[0]
+        struct.pack_into("<H", data, vtable + 4 + 2 * 12, 0)
+    else:
+        vector = len(data)
+        struct.pack_into("<I", data, table + 40, vector - table - 40)
+        data.extend(struct.pack("<I", len(entries)) + b"\0" * (4 * len(entries)))
+        for index, entry in enumerate(entries):
+            nested = _append_table(data, 8)
+            position = vector + 4 + 4 * index
+            struct.pack_into("<I", data, position, nested - position)
+            struct.pack_into("<B", data, nested + 4, entry["stream"])
+            struct.pack_into("<B", data, nested + 16, entry["reference_stream"])
+            for field_id, name in ((1, "intrinsics"), (2, "to_reference")):
+                item = entry[name]
+                if item is None:
+                    vtable = nested - struct.unpack_from("<i", data, nested)[0]
+                    struct.pack_into("<H", data, vtable + 4 + 2 * field_id, 0)
+                    continue
+                payload = _append_table(data, 8 if field_id == 1 else 2)
+                position = nested + 4 + 4 * field_id
+                struct.pack_into("<I", data, position, payload - position)
+                if field_id == 1:
+                    for field, key in enumerate(("width", "height", "fx", "fy", "cx", "cy", "distortion_model")):
+                        fmt = "I" if field < 2 else "i" if field == 6 else "f"
+                        struct.pack_into("<" + fmt, data, payload + 4 + 4 * field, item[key])
+                    _append_vector(data, payload + 32, item["distortion"], "f")
+                else:
+                    _append_vector(data, payload + 4, item["rotation"], "f")
+                    _append_vector(data, payload + 8, item["translation_mm"], "f")
+            for field_id, name in enumerate(("intrinsics_source", "extrinsics_source", "intrinsics_error", "extrinsics_error"), 4):
+                _append_vector(data, nested + 4 + 4 * field_id, entry[name].encode(), "B")
+    return bytes(data)
+
+
 class _Reader:
     def __init__(self, stream):
         self.fixture = json.load(stream)
 
     def iter_metadata(self):
-        return iter(())
+        # Record commands enable diagnostics, requiring both the policy and a v2 event.
+        if not self.fixture.get("diagnostics"):
+            return iter(())
+        return iter(
+            [
+                SimpleNamespace(
+                    name="orbbec_ego.recording",
+                    metadata={
+                        "record_device_diagnostics": "on",
+                        "diagnostic_version": "2",
+                    },
+                )
+            ]
+        )
 
     def get_summary(self):
         return None
@@ -535,7 +823,7 @@ class _Reader:
         streams = self.fixture.get("streams", ["ColorLeft", "ColorRight"])
         height = self.fixture.get("height", 1300)
         for frame_index in range(31):
-            capture_epoch = 1 if scenario == "reconnect" and frame_index >= 15 else 0
+            capture_epoch = 1 if scenario in ("reconnect", "calibration_missing_epoch") and frame_index >= 15 else 0
             sequence = frame_index - 15 if capture_epoch else frame_index
             timestamp = base + sequence * video_period
             log_time = base + frame_index * video_period
@@ -543,14 +831,27 @@ class _Reader:
                 payload_id = 0 if scenario == "wrong_side_enum" and stream_id == 3 else stream_id
                 payload = _video(sequence, timestamp, capture_epoch, video_fps, payload_id, height)
                 yield from self._message(
-                    "ego_metadata/" + name, payload, log_time
+                    f"orbbec_ego_metadata_{name.lower()}/FrameMetadata", payload, log_time
                 )
+                if self.fixture.get("tracked_aux"):
+                    yield from self._message(
+                        f"orbbec_ego_metadata_{name.lower()}/FrameMetadata_tracked", payload, log_time
+                    )
                 if mode == "embedded" and not (scenario == "missing_embedded_side" and stream_id == 3):
-                    yield from self._message("ego_media/" + name, payload, log_time)
-        yield from self._message("ego_calibration/Calibration", b"fixture", base)
-        yield from self._message("ego_device/DeviceState", b"fixture", base)
+                    yield from self._message("orbbec_ego_media/" + name, payload, log_time)
+        yield from self._message("orbbec_ego_calibration/Calibration", _calibration(scenario, height=height), base)
+        if scenario == "reconnect":
+            yield from self._message("orbbec_ego_calibration/Calibration", _calibration(scenario, 1, height), base + 1)
+        if self.fixture.get("diagnostics"):
+            yield (
+                SimpleNamespace(name="core.OrbbecEgoDeviceStateRecord"),
+                SimpleNamespace(topic="orbbec_ego_device/DeviceState"),
+                SimpleNamespace(data=_diagnostic(base), log_time=base),
+            )
+        else:
+            yield from self._message("orbbec_ego_device/DeviceState", b"fixture", base)
 
-        if scenario in ("valid", "empty_imu", "bad_imu_cadence"):
+        if scenario in ("valid", "empty_imu", "bad_imu_cadence") or (scenario.startswith("calibration_") and scenario != "calibration_missing_epoch"):
             sample_index = 0
             sample_period = 2_000_000 if scenario == "bad_imu_cadence" else 1_000_000
             for sequence in range(40):
@@ -558,9 +859,9 @@ class _Reader:
                 sample_index += len(timestamps)
                 accel_timestamps = [] if scenario == "empty_imu" and sequence == 0 else timestamps
                 yield from self._message(
-                    "ego_imu/Accel", _imu(0, sequence, 1000, accel_timestamps), timestamps[-1]
+                    "orbbec_ego_imu_accel/Imu", _imu(0, sequence, 1000, accel_timestamps), timestamps[-1]
                 )
-                yield from self._message("ego_imu/Gyro", _imu(1, sequence, 1000, timestamps), timestamps[-1])
+                yield from self._message("orbbec_ego_imu_gyro/Imu", _imu(1, sequence, 1000, timestamps), timestamps[-1])
 
         if scenario in (
             "valid",
@@ -577,12 +878,12 @@ class _Reader:
             for sequence in range(chunks):
                 timestamp = base + cadence_scale * sequence * sample_count * 1_000_000_000 // 48_000
                 yield from self._message(
-                    "ego_audio/Audio", _audio(sequence, timestamp, sample_count, sample_format), timestamp
+                    "orbbec_ego_audio/Audio", _audio(sequence, timestamp, sample_count, sample_format), timestamp
                 )
                 if mode == "embedded" and scenario != "sparse_pcm":
                     pcm_bytes = 0 if scenario == "empty_pcm" and sequence == 0 else None
                     yield from self._message(
-                        "ego_media/Audio",
+                        "orbbec_ego_media/Audio",
                         _pcm_audio(sequence, timestamp, sample_count, pcm_bytes, sample_format),
                         timestamp,
                     )
@@ -590,7 +891,7 @@ class _Reader:
                 for sequence in range(2):
                     timestamp = base + sequence * 1_000_000_000 // 48_000
                     yield from self._message(
-                        "ego_media/Audio", _pcm_audio(sequence, timestamp, 1), timestamp
+                        "orbbec_ego_media/Audio", _pcm_audio(sequence, timestamp, 1), timestamp
                     )
 
     @staticmethod
@@ -636,6 +937,14 @@ make_aux_verify_run() {
     printf '\0' > "$run_dir/raw/ColorLeft.h264"
     printf '\0' > "$run_dir/raw/ColorRight.h264"
     printf '\0' > "$run_dir/Audio.wav"
+    PYTHONPATH="$AUX_MCAP_MODULES" python3 - "$run_dir/calibration.json" "$scenario" <<'PY'
+import json
+import sys
+from pathlib import Path
+from mcap.reader import calibration_json_value
+
+Path(sys.argv[1]).write_text(json.dumps(calibration_json_value(sys.argv[2])))
+PY
     cat > "$run_dir/requested_profile.json" <<'EOF'
 {"version":1,"streams":{"ColorLeft":{"format":"h264","width":1600,"height":1300,"fps":30},"ColorRight":{"format":"h264","width":1600,"height":1300,"fps":30}}}
 EOF
@@ -651,10 +960,11 @@ make_quad_verify_run() {
     local scenario="$2"
     local mode="$3"
     make_aux_verify_run "$run_dir" "$scenario" "$mode"
-    python3 - "$run_dir" "$scenario" "$mode" <<'PY'
+    PYTHONPATH="$AUX_MCAP_MODULES" python3 - "$run_dir" "$scenario" "$mode" <<'PY'
 import json
 from pathlib import Path
 import sys
+from mcap.reader import calibration_json_value
 
 run_dir = Path(sys.argv[1])
 streams = ["ColorLeft", "ColorRight", "ColorSideLeft", "ColorSideRight"]
@@ -670,10 +980,11 @@ actual = streams[:-1] if sys.argv[2] == "missing_side" else streams
 for name in streams:
     (run_dir / "raw" / (name + ".h264")).write_bytes(b"\0")
 (run_dir / "Audio.wav").unlink()
+(run_dir / "calibration.json").write_text(json.dumps(calibration_json_value(sys.argv[2], 1200)), encoding="utf-8")
 PY
 }
 
-for mode in metadata-only embedded; do
+for mode in sidecar embedded; do
     run="$TMPDIR_TEST/quad_no_aux_$mode"
     make_quad_verify_run "$run" quad "$mode"
     PYTHONPATH="$AUX_MCAP_MODULES" PATH="$AUX_VERIFY_BIN:$PATH" VERIFY_HEIGHT=1200 MOCK_QUAD=1 \
@@ -685,11 +996,23 @@ for mode in metadata-only embedded; do
     grep -F 'Verification passed:' "$run/verification_report.txt" >/dev/null
 done
 
+QUAD_TRACKED_RUN="$TMPDIR_TEST/quad_tracked_aux"
+make_quad_verify_run "$QUAD_TRACKED_RUN" quad sidecar
+python3 - "$QUAD_TRACKED_RUN/metadata.mcap" <<'PY'
+import json
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text(json.dumps({**json.loads(path.read_text()), "tracked_aux": True}))
+PY
+PYTHONPATH="$AUX_MCAP_MODULES" PATH="$AUX_VERIFY_BIN:$PATH" VERIFY_HEIGHT=1200 \
+    "$SCRIPT" verify "$QUAD_TRACKED_RUN" --media-mode sidecar >/dev/null 2>&1
+
 for scenario in missing_side wrong_side_enum; do
     run="$TMPDIR_TEST/quad_$scenario"
-    make_quad_verify_run "$run" "$scenario" metadata-only
+    make_quad_verify_run "$run" "$scenario" sidecar
     expect_failure env PYTHONPATH="$AUX_MCAP_MODULES" PATH="$AUX_VERIFY_BIN:$PATH" VERIFY_HEIGHT=1200 \
-        "$SCRIPT" verify "$run" --media-mode metadata-only
+        "$SCRIPT" verify "$run" --media-mode sidecar
     if [[ "$scenario" == missing_side ]]; then
         grep -F 'differ from requested' "$run/verification_report.failed.txt" >/dev/null
     else
@@ -703,19 +1026,268 @@ expect_failure env PYTHONPATH="$AUX_MCAP_MODULES" PATH="$AUX_VERIFY_BIN:$PATH" V
     "$SCRIPT" verify "$QUAD_MISSING_MEDIA_RUN" --media-mode embedded
 grep -F 'differ from metadata' "$QUAD_MISSING_MEDIA_RUN/verification_report.failed.txt" >/dev/null
 
+QUAD_CALIBRATION_RUN="$TMPDIR_TEST/quad_calibration_valid"
+make_quad_verify_run "$QUAD_CALIBRATION_RUN" quad_calibration_valid sidecar
+PYTHONPATH="$AUX_MCAP_MODULES" PATH="$AUX_VERIFY_BIN:$PATH" VERIFY_HEIGHT=1200 \
+    "$SCRIPT" verify "$QUAD_CALIBRATION_RUN" --media-mode sidecar --require-calibration >/dev/null 2>&1
+grep -F 'Required structured calibration: OK' "$QUAD_CALIBRATION_RUN/verification_report.txt" >/dev/null
+for scenario in quad quad_calibration_missing_side quad_calibration_missing_intrinsics \
+        quad_calibration_bad_rotation quad_calibration_wrong_reference; do
+    run="$TMPDIR_TEST/strict_$scenario"
+    make_quad_verify_run "$run" "$scenario" sidecar
+    expect_failure env PYTHONPATH="$AUX_MCAP_MODULES" PATH="$AUX_VERIFY_BIN:$PATH" VERIFY_HEIGHT=1200 \
+        "$SCRIPT" verify "$run" --media-mode sidecar --require-calibration
+    grep -F 'Calibration' "$run/verification_report.failed.txt" >/dev/null
+done
+
 AUX_VALID_RUN="$TMPDIR_TEST/aux_valid"
-make_aux_verify_run "$AUX_VALID_RUN" valid metadata-only
+make_aux_verify_run "$AUX_VALID_RUN" valid sidecar
+DETECTED_MODE="$(PYTHONPATH="$AUX_MCAP_MODULES" python3 \
+    "$(dirname "$SCRIPT")/tools/detect_media_mode.py" "$AUX_VALID_RUN/metadata.mcap")"
+[[ "$DETECTED_MODE" == sidecar ]]
+AUX_EMBEDDED_RUN="$TMPDIR_TEST/aux_embedded"
+make_aux_verify_run "$AUX_EMBEDDED_RUN" valid embedded
+DETECTED_MODE="$(PYTHONPATH="$AUX_MCAP_MODULES" python3 \
+    "$(dirname "$SCRIPT")/tools/detect_media_mode.py" "$AUX_EMBEDDED_RUN/metadata.mcap")"
+[[ "$DETECTED_MODE" == embedded ]]
+
+for invalid_mode in metadata-only invalid; do
+    expect_failure_message "Unknown MCAP media mode '$invalid_mode'" \
+        env PYTHONPATH="$AUX_MCAP_MODULES" PATH="$AUX_VERIFY_BIN:$PATH" \
+        "$SCRIPT" verify "$AUX_VALID_RUN" --media-mode "$invalid_mode"
+    for override_mode in sidecar embedded; do
+        expect_failure_message "Unknown MCAP media mode '$invalid_mode'" \
+            env PYTHONPATH="$AUX_MCAP_MODULES" PATH="$AUX_VERIFY_BIN:$PATH" \
+            "$SCRIPT" verify "$AUX_VALID_RUN" --media-mode "$invalid_mode" --media-mode "$override_mode"
+    done
+    expect_failure_message "MCAP media mode must be sidecar or embedded" \
+        env PYTHONPATH="$AUX_MCAP_MODULES" python3 \
+        "$(dirname "$SCRIPT")/tools/verify_sensor_topics.py" \
+        "$TMPDIR_TEST/missing.mcap" "$invalid_mode"
+    expect_failure_message "MCAP media mode must be sidecar or embedded" \
+        env PYTHONPATH="$AUX_MCAP_MODULES" python3 \
+        "$(dirname "$SCRIPT")/tools/verify_video_timing.py" \
+        "$TMPDIR_TEST/missing.mcap" "$invalid_mode" 31 31 \
+        "$TMPDIR_TEST/missing_profile.json"
+done
+
 PYTHONPATH="$AUX_MCAP_MODULES" PATH="$AUX_VERIFY_BIN:$PATH" \
-    "$SCRIPT" verify "$AUX_VALID_RUN" --media-mode metadata-only --expect-imu --expect-audio \
+    "$SCRIPT" verify "$AUX_VALID_RUN" --media-mode sidecar --expect-imu --expect-audio \
     >/dev/null 2>&1
 grep -F 'raw_device_fps=30.000' "$AUX_VALID_RUN/verification_report.txt" >/dev/null
 grep -F 'ffprobe_rate): h264,1600,1300,60/1' "$AUX_VALID_RUN/verification_report.txt" >/dev/null
 
+PYTHONPATH="$AUX_MCAP_MODULES" PATH="$AUX_VERIFY_BIN:$PATH" \
+    "$SCRIPT" verify "$AUX_VALID_RUN" --media-mode sidecar --require-calibration --expect-imu \
+    >/dev/null 2>&1
+grep -F 'Required structured calibration: OK' "$AUX_VALID_RUN/verification_report.txt" >/dev/null
+grep -F 'Calibration JSON matches' "$AUX_VALID_RUN/verification_report.txt" >/dev/null
+STEREO_CALIBRATION_RUN="$TMPDIR_TEST/stereo_calibration_valid"
+make_aux_verify_run "$STEREO_CALIBRATION_RUN" stereo_calibration_valid sidecar
+PYTHONPATH="$AUX_MCAP_MODULES" PATH="$AUX_VERIFY_BIN:$PATH" \
+    "$SCRIPT" verify "$STEREO_CALIBRATION_RUN" --media-mode sidecar --require-calibration >/dev/null 2>&1
+STEREO_MISSING_LEGACY_RUN="$TMPDIR_TEST/stereo_calibration_missing_legacy"
+make_aux_verify_run "$STEREO_MISSING_LEGACY_RUN" stereo_calibration_missing_legacy sidecar
+expect_failure env PYTHONPATH="$AUX_MCAP_MODULES" PATH="$AUX_VERIFY_BIN:$PATH" \
+    "$SCRIPT" verify "$STEREO_MISSING_LEGACY_RUN" --media-mode sidecar --require-calibration
+grep -F 'left_to_right is missing' "$STEREO_MISSING_LEGACY_RUN/verification_report.failed.txt" >/dev/null
+for scenario in calibration_missing calibration_bad_rotation calibration_reflection \
+        calibration_bad_translation calibration_nonfinite calibration_bad_dimensions \
+        calibration_bad_focal calibration_missing_epoch; do
+    run="$TMPDIR_TEST/$scenario"
+    make_aux_verify_run "$run" "$scenario" sidecar
+    expect_failure env PYTHONPATH="$AUX_MCAP_MODULES" PATH="$AUX_VERIFY_BIN:$PATH" \
+        "$SCRIPT" verify "$run" --media-mode sidecar --require-calibration
+    grep -F 'Calibration' "$run/verification_report.failed.txt" >/dev/null
+done
+CALIBRATION_OPTIONAL_RUN="$TMPDIR_TEST/calibration_missing"
+PYTHONPATH="$AUX_MCAP_MODULES" PATH="$AUX_VERIFY_BIN:$PATH" \
+    "$SCRIPT" verify "$CALIBRATION_OPTIONAL_RUN" --media-mode sidecar >/dev/null 2>&1
+grep -F 'missing=gyro_to_left' "$CALIBRATION_OPTIONAL_RUN/verification_report.txt" >/dev/null
+CALIBRATION_JSON_RUN="$TMPDIR_TEST/calibration_json_mismatch"
+make_aux_verify_run "$CALIBRATION_JSON_RUN" valid sidecar
+sed -i 's/500.25/999.25/' "$CALIBRATION_JSON_RUN/calibration.json"
+expect_failure env PYTHONPATH="$AUX_MCAP_MODULES" PATH="$AUX_VERIFY_BIN:$PATH" \
+    "$SCRIPT" verify "$CALIBRATION_JSON_RUN" --media-mode sidecar --require-calibration
+grep -F 'calibration JSON.color_left.fx differs' "$CALIBRATION_JSON_RUN/verification_report.failed.txt" >/dev/null
+
+FINALIZE_PLUGIN="$TMPDIR_TEST/finalize_plugin"
+cat > "$FINALIZE_PLUGIN" <<'PY'
+#!/usr/bin/env python3
+import json
+import os
+import shutil
+import signal
+import sys
+import time
+from pathlib import Path
+
+if "--list-capabilities" in sys.argv:
+    print("Sensor LeftColor\nSensor RightColor")
+    sys.exit(0)
+
+stopping = False
+
+
+def stop_recording(_signum, _frame):
+    global stopping
+    stopping = True
+
+
+signal.signal(signal.SIGINT, stop_recording)
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+target = Path(
+    next(arg.split("=", 1)[1] for arg in sys.argv if arg.startswith("--mcap-filename="))
+)
+fixture = Path(os.environ["FINALIZE_FIXTURE"])
+partial = target.with_suffix(".mcap.partial")
+partial.write_text(
+    json.dumps(
+        {**json.loads((fixture / "metadata.mcap").read_text()), "diagnostics": True}
+    )
+)
+for sidecar in (fixture / "raw").iterdir():
+    shutil.copyfile(sidecar, target.parent / "raw" / sidecar.name)
+shutil.copyfile(fixture / "calibration.json", target.parent / "calibration.json")
+(target.parent / "plugin.pid").write_text(str(os.getpid()))
+print("recording ready", flush=True)
+while not stopping:
+    time.sleep(0.05)
+# Shutdown logging must complete before the final MCAP rename.
+time.sleep(0.15)
+print("controlled shutdown complete", flush=True)
+print((fixture / "logs/capture.log").read_text(), end="", flush=True)
+partial.replace(target)
+sys.exit(int(os.environ.get("FINALIZE_EXIT_STATUS", "0")))
+PY
+chmod +x "$FINALIZE_PLUGIN"
+
+TEE_FAIL_BIN="$TMPDIR_TEST/tee_fail_bin"
+mkdir -p "$TEE_FAIL_BIN"
+REAL_TEE="$(command -v tee)"
+cat > "$TEE_FAIL_BIN/tee" <<'EOF'
+#!/usr/bin/env bash
+for argument in "$@"; do
+    if [[ "$argument" == */logs/capture.log ]]; then
+        exec "$REAL_TEE" "$@" /dev/full
+    fi
+done
+exec "$REAL_TEE" "$@"
+EOF
+chmod +x "$TEE_FAIL_BIN/tee"
+
+PYTHONPATH="$AUX_MCAP_MODULES" PATH="$AUX_VERIFY_BIN:$PATH" \
+    FINALIZE_FIXTURE="$AUX_VALID_RUN" REAL_TEE="$REAL_TEE" \
+    python3 - "$SCRIPT" "$FINALIZE_PLUGIN" "$TMPDIR_TEST" "$TEE_FAIL_BIN" <<'PY'
+import os
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+script, plugin, temporary, tee_fail_bin = sys.argv[1:]
+# Ctrl-C reaches the whole foreground group, including the shell and tee.
+for name, duration, interrupt, exit_status, tee_failure in (
+    ("ctrl_c", None, True, 0, False),
+    ("timed_ctrl_c", "30", True, 0, False),
+    ("timed_completion", "1", False, 0, False),
+    ("timed_complete_calibration", "1", False, 0, False),
+    ("ctrl_c_plugin_failure", None, True, 7, False),
+    ("ctrl_c_log_failure", None, True, 0, True),
+):
+    run = Path(temporary) / name
+    capture_log = run / "logs/capture.log"
+    command = [
+        script,
+        "record",
+        "--plugin",
+        plugin,
+        "--output",
+        str(run),
+        "--no-imu",
+        "--no-audio",
+    ]
+    if duration:
+        command.extend(["--duration", duration])
+    if name == "timed_complete_calibration":
+        command.append("--require-calibration")
+    environment = dict(os.environ, FINALIZE_EXIT_STATUS=str(exit_status))
+    if tee_failure:
+        environment["PATH"] = f"{tee_fail_bin}:{environment['PATH']}"
+    output_path = Path(temporary) / f"{name}.output"
+    with output_path.open("w") as output:
+        process = subprocess.Popen(
+            command,
+            stdout=output,
+            stderr=subprocess.STDOUT,
+            env=environment,
+            start_new_session=True,
+        )
+        try:
+            deadline = time.monotonic() + 5
+            while not (
+                capture_log.exists() and "recording ready" in capture_log.read_text()
+            ):
+                assert process.poll() is None and time.monotonic() < deadline, (
+                    f"{name}: plugin did not become ready\n{output_path.read_text()}"
+                )
+                time.sleep(0.01)
+            if interrupt:
+                os.killpg(process.pid, signal.SIGINT)
+            process.wait(timeout=8)
+        finally:
+            pid_file = run / "plugin.pid"
+            if pid_file.exists():
+                try:
+                    os.kill(int(pid_file.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=5)
+    output = output_path.read_text()
+    if name == "timed_complete_calibration":
+        assert "Required structured calibration: OK" in output, output
+    assert (run / "metadata.mcap").is_file(), (
+        f"{name}: MCAP was not finalized\n{output}"
+    )
+    assert not list(run.rglob("*.partial")), (
+        f"{name}: partial recording remains\n{output}"
+    )
+    log = capture_log.read_text()
+    assert "controlled shutdown complete" in log, (
+        f"{name}: shutdown log was lost\n{output}"
+    )
+    assert "video_frame_sets_dropped=0" in log, (
+        f"{name}: capture statistics were lost\n{output}"
+    )
+    report = run / "verification_report.txt"
+    if exit_status or tee_failure:
+        assert process.returncode != 0, (
+            f"{name}: capture failure was accepted\n{output}"
+        )
+        expected = (
+            "Unable to write capture log"
+            if tee_failure
+            else "Capture failed with status 7"
+        )
+        assert expected in output, f"{name}: missing failure diagnostic\n{output}"
+        assert not report.exists(), f"{name}: verification ran after capture failure"
+    else:
+        assert process.returncode == 0, f"{name}: capture failed\n{output}"
+        assert "Verification passed:" in report.read_text(), (
+            f"{name}: verification did not complete"
+        )
+PY
+
 for scenario in bad_video_profile bad_video_cadence; do
     run="$TMPDIR_TEST/$scenario"
-    make_aux_verify_run "$run" "$scenario" metadata-only
+    make_aux_verify_run "$run" "$scenario" sidecar
     expect_failure env PYTHONPATH="$AUX_MCAP_MODULES" PATH="$AUX_VERIFY_BIN:$PATH" \
-        "$SCRIPT" verify "$run" --media-mode metadata-only
+        "$SCRIPT" verify "$run" --media-mode sidecar
     if [[ "$scenario" == bad_video_profile ]]; then
         grep -F 'differs from requested' "$run/verification_report.failed.txt" >/dev/null
     else
@@ -730,55 +1302,55 @@ expect_failure python3 "$(dirname "$SCRIPT")/tools/verify_profile.py" \
     "$AUX_VALID_RUN/requested_profile.json" hevc,1600,1300,60/1 h264,1600,1300,60/1
 
 AUX_RECONNECT_RUN="$TMPDIR_TEST/aux_reconnect"
-make_aux_verify_run "$AUX_RECONNECT_RUN" reconnect metadata-only
+make_aux_verify_run "$AUX_RECONNECT_RUN" reconnect sidecar
 PYTHONPATH="$AUX_MCAP_MODULES" PATH="$AUX_VERIFY_BIN:$PATH" \
-    "$SCRIPT" verify "$AUX_RECONNECT_RUN" --media-mode metadata-only >/dev/null 2>&1
+    "$SCRIPT" verify "$AUX_RECONNECT_RUN" --media-mode sidecar >/dev/null 2>&1
 
 AUX_EMPTY_IMU_RUN="$TMPDIR_TEST/aux_empty_imu"
-make_aux_verify_run "$AUX_EMPTY_IMU_RUN" empty_imu metadata-only
+make_aux_verify_run "$AUX_EMPTY_IMU_RUN" empty_imu sidecar
 set +e
 AUX_EMPTY_IMU_OUTPUT="$(PYTHONPATH="$AUX_MCAP_MODULES" PATH="$AUX_VERIFY_BIN:$PATH" \
-    "$SCRIPT" verify "$AUX_EMPTY_IMU_RUN" --media-mode metadata-only --expect-imu 2>&1)"
+    "$SCRIPT" verify "$AUX_EMPTY_IMU_RUN" --media-mode sidecar --expect-imu 2>&1)"
 AUX_EMPTY_IMU_STATUS=$?
 set -e
 [[ "$AUX_EMPTY_IMU_STATUS" -ne 0 ]]
 grep -F "contains an empty IMU batch" <<< "$AUX_EMPTY_IMU_OUTPUT" >/dev/null
 
 AUX_BAD_IMU_CADENCE_RUN="$TMPDIR_TEST/aux_bad_imu_cadence"
-make_aux_verify_run "$AUX_BAD_IMU_CADENCE_RUN" bad_imu_cadence metadata-only
+make_aux_verify_run "$AUX_BAD_IMU_CADENCE_RUN" bad_imu_cadence sidecar
 set +e
 AUX_BAD_IMU_CADENCE_OUTPUT="$(PYTHONPATH="$AUX_MCAP_MODULES" PATH="$AUX_VERIFY_BIN:$PATH" \
-    "$SCRIPT" verify "$AUX_BAD_IMU_CADENCE_RUN" --media-mode metadata-only --expect-imu 2>&1)"
+    "$SCRIPT" verify "$AUX_BAD_IMU_CADENCE_RUN" --media-mode sidecar --expect-imu 2>&1)"
 AUX_BAD_IMU_CADENCE_STATUS=$?
 set -e
 [[ "$AUX_BAD_IMU_CADENCE_STATUS" -ne 0 ]]
 grep -F "raw-device cadence is 500.000 Hz" <<< "$AUX_BAD_IMU_CADENCE_OUTPUT" >/dev/null
 
 AUX_SPARSE_AUDIO_RUN="$TMPDIR_TEST/aux_sparse_audio"
-make_aux_verify_run "$AUX_SPARSE_AUDIO_RUN" sparse_audio metadata-only
+make_aux_verify_run "$AUX_SPARSE_AUDIO_RUN" sparse_audio sidecar
 set +e
 AUX_SPARSE_AUDIO_OUTPUT="$(PYTHONPATH="$AUX_MCAP_MODULES" PATH="$AUX_VERIFY_BIN:$PATH" \
-    "$SCRIPT" verify "$AUX_SPARSE_AUDIO_RUN" --media-mode metadata-only --expect-audio 2>&1)"
+    "$SCRIPT" verify "$AUX_SPARSE_AUDIO_RUN" --media-mode sidecar --expect-audio 2>&1)"
 AUX_SPARSE_AUDIO_STATUS=$?
 set -e
 [[ "$AUX_SPARSE_AUDIO_STATUS" -ne 0 ]]
 grep -F "contains only" <<< "$AUX_SPARSE_AUDIO_OUTPUT" >/dev/null
 
 AUX_BAD_AUDIO_CADENCE_RUN="$TMPDIR_TEST/aux_bad_audio_cadence"
-make_aux_verify_run "$AUX_BAD_AUDIO_CADENCE_RUN" bad_audio_cadence metadata-only
+make_aux_verify_run "$AUX_BAD_AUDIO_CADENCE_RUN" bad_audio_cadence sidecar
 set +e
 AUX_BAD_AUDIO_CADENCE_OUTPUT="$(PYTHONPATH="$AUX_MCAP_MODULES" PATH="$AUX_VERIFY_BIN:$PATH" \
-    "$SCRIPT" verify "$AUX_BAD_AUDIO_CADENCE_RUN" --media-mode metadata-only --expect-audio 2>&1)"
+    "$SCRIPT" verify "$AUX_BAD_AUDIO_CADENCE_RUN" --media-mode sidecar --expect-audio 2>&1)"
 AUX_BAD_AUDIO_CADENCE_STATUS=$?
 set -e
 [[ "$AUX_BAD_AUDIO_CADENCE_STATUS" -ne 0 ]]
 grep -F "raw-device cadence is 24000.000 Hz" <<< "$AUX_BAD_AUDIO_CADENCE_OUTPUT" >/dev/null
 
 AUX_BAD_AUDIO_FORMAT_RUN="$TMPDIR_TEST/aux_bad_audio_format"
-make_aux_verify_run "$AUX_BAD_AUDIO_FORMAT_RUN" bad_audio_format metadata-only
+make_aux_verify_run "$AUX_BAD_AUDIO_FORMAT_RUN" bad_audio_format sidecar
 set +e
 AUX_BAD_AUDIO_FORMAT_OUTPUT="$(PYTHONPATH="$AUX_MCAP_MODULES" PATH="$AUX_VERIFY_BIN:$PATH" \
-    "$SCRIPT" verify "$AUX_BAD_AUDIO_FORMAT_RUN" --media-mode metadata-only --expect-audio 2>&1)"
+    "$SCRIPT" verify "$AUX_BAD_AUDIO_FORMAT_RUN" --media-mode sidecar --expect-audio 2>&1)"
 AUX_BAD_AUDIO_FORMAT_STATUS=$?
 set -e
 [[ "$AUX_BAD_AUDIO_FORMAT_STATUS" -ne 0 ]]
@@ -792,7 +1364,7 @@ AUX_SPARSE_PCM_OUTPUT="$(PYTHONPATH="$AUX_MCAP_MODULES" PATH="$AUX_VERIFY_BIN:$P
 AUX_SPARSE_PCM_STATUS=$?
 set -e
 [[ "$AUX_SPARSE_PCM_STATUS" -ne 0 ]]
-grep -F "ego_media/Audio epoch 0 contains only" <<< "$AUX_SPARSE_PCM_OUTPUT" >/dev/null
+grep -F "orbbec_ego_media/Audio epoch 0 contains only" <<< "$AUX_SPARSE_PCM_OUTPUT" >/dev/null
 
 AUX_EMPTY_PCM_RUN="$TMPDIR_TEST/aux_empty_pcm"
 make_aux_verify_run "$AUX_EMPTY_PCM_RUN" empty_pcm embedded

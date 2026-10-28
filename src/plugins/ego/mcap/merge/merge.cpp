@@ -21,9 +21,9 @@ namespace plugins::ego
 namespace
 {
 constexpr std::string_view observed_prefix = "session_observed/";
-constexpr std::array structured_names = { "core.EgoFrameMetadataRecord", "core.EgoImuBatchRecord",
-                                          "core.EgoAudioChunkRecord", "core.EgoCalibrationRecord",
-                                          "core.EgoDeviceStateRecord" };
+constexpr std::array structured_names = { "core.OrbbecEgoFrameMetadataRecord", "core.OrbbecEgoImuBatchRecord",
+                                          "core.OrbbecEgoAudioChunkRecord", "core.OrbbecEgoCalibrationRecord",
+                                          "core.OrbbecEgoDeviceStateRecord" };
 
 void check(const mcap::Status& status)
 {
@@ -129,7 +129,7 @@ Counts scan(Source& source, mcap::McapWriter* output = nullptr)
     records.onMetadata = [&](const mcap::Metadata& metadata, auto)
     {
         ++counts.metadata;
-        if (metadata.name == "ego.recording")
+        if (metadata.name == "orbbec_ego.recording")
         {
             const auto flag = metadata.metadata.find("record_device_diagnostics");
             const auto version = metadata.metadata.find("diagnostic_version");
@@ -273,9 +273,10 @@ void merge_recording(const std::filesystem::path& recording_path,
         // Match schema identity, including custom topic names and empty registered channels.
         for (const Source* source : { &recording, &media })
             for (const auto& [id, channel] : source->channels)
-                if (const auto schema = source->schema(*channel); schema && schema->name == "core.EgoDeviceStateRecord")
-                    throw std::runtime_error("Diagnostic recording is off but an input contains EgoDeviceState: " +
-                                             channel->topic);
+                if (const auto schema = source->schema(*channel);
+                    schema && schema->name == "core.OrbbecEgoDeviceStateRecord")
+                    throw std::runtime_error(
+                        "Diagnostic recording is off but an input contains OrbbecEgoDeviceState: " + channel->topic);
     }
     const auto conflicts = conflicting_topics(recording, media);
     if (recording.schemas.size() + media.schemas.size() > std::numeric_limits<mcap::SchemaId>::max() ||
@@ -290,7 +291,7 @@ void merge_recording(const std::filesystem::path& recording_path,
     {
         mcap::McapWriterOptions options(recording.reader.header()->profile);
         options.compression = mcap::Compression::None;
-        options.library = "isaaccapture.ego.merge";
+        options.library = "isaaccapture.plugins.ego.merge";
         output.open(stream, options);
         // The fragment includes capture-tail samples that the host may not poll.
         // Preserve overlapping host observations under session_observed/.
@@ -299,7 +300,7 @@ void merge_recording(const std::filesystem::path& recording_path,
         scan(recording, &output);
         scan(media, &output);
         mcap::Metadata provenance;
-        provenance.name = "ego.merge";
+        provenance.name = "orbbec_ego.merge";
         provenance.metadata = { { "recording", recording_file.string() },
                                 { "media", media_file.string() },
                                 { "recording.library", recording.reader.header()->library },

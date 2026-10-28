@@ -3,15 +3,177 @@
 
 #include "calibration.hpp"
 
+#include "inc/ego_camera/raw_calibration.hpp"
+
+#include <yaml-cpp/yaml.h>
+
+// Separate std headers because clang-format's module category does not match yaml-cpp.
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdlib>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 namespace plugins::ego
 {
+
+namespace
+{
+
+YAML::Node unique_yaml_field(const YAML::Node& mapping, const std::string& name)
+{
+    YAML::Node result(YAML::NodeType::Undefined);
+    if (!mapping.IsMap())
+        return result;
+    for (const auto& field : mapping)
+    {
+        if (!field.first.IsScalar() || field.first.as<std::string>() != name)
+            continue;
+        if (result.IsDefined())
+            return YAML::Node(YAML::NodeType::Undefined);
+        result = field.second;
+    }
+    return result;
+}
+
+bool valid_imu_transform(const std::array<std::array<double, 4>, 4>& matrix)
+{
+    constexpr double tolerance = 1e-4;
+    for (size_t column = 0; column < 4; ++column)
+    {
+        if (std::abs(matrix[3][column] - (column == 3 ? 1.0 : 0.0)) > 1e-6)
+            return false;
+    }
+    for (size_t first = 0; first < 3; ++first)
+    {
+        for (size_t second = 0; second < 3; ++second)
+        {
+            double product = 0;
+            for (size_t row = 0; row < 3; ++row)
+                product += matrix[row][first] * matrix[row][second];
+            if (std::abs(product - (first == second ? 1.0 : 0.0)) > tolerance)
+                return false;
+        }
+    }
+    const auto& a = matrix[0];
+    const auto& b = matrix[1];
+    const auto& c = matrix[2];
+    const double determinant =
+        a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0]) + a[2] * (b[0] * c[1] - b[1] * c[0]);
+    return std::abs(determinant - 1.0) <= tolerance;
+}
+
+} // namespace
+
+bool populate_imu_calibration_from_yaml(const std::string& yaml, core::OrbbecEgoCalibrationT& calibration)
+{
+    core::OrbbecEgoExtrinsicsT extrinsics;
+    try
+    {
+        std::string parse_input = yaml;
+        if (parse_input.rfind("%YAML:1.0", 0) == 0)
+            parse_input.replace(0, 9, "%YAML 1.1");
+        const auto documents = YAML::LoadAll(parse_input);
+        if (documents.size() != 1)
+            return false;
+        const auto camera = unique_yaml_field(documents.front(), "cam0");
+        const auto transform = unique_yaml_field(camera, "T_cam_imu");
+        if (!transform.IsSequence() || transform.size() != 4)
+            return false;
+        std::array<std::array<double, 4>, 4> matrix{};
+        for (size_t row = 0; row < 4; ++row)
+        {
+            if (!transform[row].IsSequence() || transform[row].size() != 4)
+                return false;
+            for (size_t column = 0; column < 4; ++column)
+            {
+                const double value = transform[row][column].as<double>();
+                if (!std::isfinite(value) || std::abs(value) > std::numeric_limits<float>::max())
+                    return false;
+                matrix[row][column] = value;
+            }
+        }
+        if (!valid_imu_transform(matrix))
+            return false;
+        // EGO SDK d49af169 registers T_cam_imu as accel -> cam0, then declares
+        // gyro/accel coincident. Its row-major rotation and mm translation copy directly.
+        for (size_t row = 0; row < 3; ++row)
+        {
+            for (size_t column = 0; column < 3; ++column)
+                extrinsics.rotation.push_back(static_cast<float>(matrix[row][column]));
+            extrinsics.translation_mm.push_back(static_cast<float>(matrix[row][3]));
+        }
+    }
+    catch (const YAML::Exception&)
+    {
+        return false;
+    }
+
+    auto accel = calibration.accel_to_left;
+    auto gyro = calibration.gyro_to_left;
+    if (!accel)
+        accel = std::make_shared<core::OrbbecEgoExtrinsicsT>(extrinsics);
+    if (!gyro)
+        gyro = std::make_shared<core::OrbbecEgoExtrinsicsT>(extrinsics);
+    calibration.accel_to_left = std::move(accel);
+    calibration.gyro_to_left = std::move(gyro);
+    return true;
+}
+
+bool populate_stereo_video_extrinsics(core::OrbbecEgoCalibrationT& calibration)
+{
+    const auto& canonical = calibration.left_to_right;
+    if (!canonical || canonical->rotation.size() != 9 || canonical->translation_mm.size() != 3)
+        return false;
+    std::array<std::array<double, 4>, 4> matrix{};
+    matrix[3][3] = 1.0;
+    for (size_t row = 0; row < 3; ++row)
+    {
+        for (size_t column = 0; column < 3; ++column)
+        {
+            const auto value = canonical->rotation[row * 3 + column];
+            if (!std::isfinite(value))
+                return false;
+            matrix[row][column] = value;
+        }
+        if (!std::isfinite(canonical->translation_mm[row]))
+            return false;
+        matrix[row][3] = canonical->translation_mm[row];
+    }
+    if (!valid_imu_transform(matrix))
+        return false;
+
+    auto inverse = std::make_shared<core::OrbbecEgoExtrinsicsT>();
+    // Per-stream transforms point to the left reference: inverse(R, t) = (R^T, -R^T t).
+    for (size_t row = 0; row < 3; ++row)
+    {
+        double translation = 0;
+        for (size_t column = 0; column < 3; ++column)
+        {
+            inverse->rotation.push_back(static_cast<float>(matrix[column][row]));
+            translation -= matrix[column][row] * matrix[column][3];
+        }
+        if (!std::isfinite(translation) || std::abs(translation) > std::numeric_limits<float>::max())
+            return false;
+        inverse->translation_mm.push_back(static_cast<float>(translation));
+    }
+    bool populated = false;
+    for (auto& entry : calibration.video_streams)
+    {
+        if (!entry || entry->stream != core::OrbbecEgoCameraStream_ColorRight ||
+            entry->reference_stream != core::OrbbecEgoCameraStream_ColorLeft || entry->to_reference)
+            continue;
+        entry->to_reference = inverse;
+        entry->extrinsics_source = "stereo_calibration_inverse";
+        entry->extrinsics_error.clear();
+        populated = true;
+    }
+    return populated;
+}
 
 std::vector<float> yaml_numbers(const std::string& text)
 {
@@ -32,7 +194,7 @@ std::vector<float> yaml_numbers(const std::string& text)
     return numbers;
 }
 
-bool populate_stereo_calibration_from_yaml(const std::string& yaml, core::EgoCalibrationT& calibration)
+bool populate_stereo_calibration_from_yaml(const std::string& yaml, core::OrbbecEgoCalibrationT& calibration)
 {
     struct Camera
     {
@@ -129,7 +291,7 @@ bool populate_stereo_calibration_from_yaml(const std::string& yaml, core::EgoCal
         return false;
     const auto intrinsics = [](const Camera& camera)
     {
-        auto result = std::make_shared<core::EgoCameraIntrinsicsT>();
+        auto result = std::make_shared<core::OrbbecEgoCameraIntrinsicsT>();
         result->width = camera.width;
         result->height = camera.height;
         result->fx = camera.fx;
@@ -144,7 +306,7 @@ bool populate_stereo_calibration_from_yaml(const std::string& yaml, core::EgoCal
     calibration.color_right = intrinsics(cameras[1]);
     if (cameras[1].rotation.size() == 9 && cameras[1].translation.size() == 3)
     {
-        calibration.left_to_right = std::make_shared<core::EgoExtrinsicsT>();
+        calibration.left_to_right = std::make_shared<core::OrbbecEgoExtrinsicsT>();
         calibration.left_to_right->rotation = cameras[1].rotation;
         calibration.left_to_right->translation_mm = cameras[1].translation;
     }
@@ -152,24 +314,24 @@ bool populate_stereo_calibration_from_yaml(const std::string& yaml, core::EgoCal
 }
 
 void populate_video_calibration(const std::shared_ptr<ob::Device>& device,
-                                const std::map<core::EgoCameraStream, std::shared_ptr<ob::VideoStreamProfile>>& profiles,
-                                core::EgoCalibrationT& calibration)
+                                const std::map<core::OrbbecEgoCameraStream, std::shared_ptr<ob::VideoStreamProfile>>& profiles,
+                                core::OrbbecEgoCalibrationT& calibration)
 {
     if (profiles.empty())
         return;
-    const auto reference =
-        profiles.count(core::EgoCameraStream_ColorLeft) ? core::EgoCameraStream_ColorLeft : profiles.begin()->first;
-    const auto sensor_type = [](core::EgoCameraStream stream)
+    const auto reference = profiles.count(core::OrbbecEgoCameraStream_ColorLeft) ? core::OrbbecEgoCameraStream_ColorLeft :
+                                                                                   profiles.begin()->first;
+    const auto sensor_type = [](core::OrbbecEgoCameraStream stream)
     {
         switch (stream)
         {
-        case core::EgoCameraStream_ColorLeft:
+        case core::OrbbecEgoCameraStream_ColorLeft:
             return OB_SENSOR_COLOR_LEFT;
-        case core::EgoCameraStream_ColorRight:
+        case core::OrbbecEgoCameraStream_ColorRight:
             return OB_SENSOR_COLOR_RIGHT;
-        case core::EgoCameraStream_ColorSideLeft:
+        case core::OrbbecEgoCameraStream_ColorSideLeft:
             return OB_SENSOR_COLOR_SIDE_LEFT;
-        case core::EgoCameraStream_ColorSideRight:
+        case core::OrbbecEgoCameraStream_ColorSideRight:
             return OB_SENSOR_COLOR_SIDE_RIGHT;
         default:
             throw std::invalid_argument("Unknown EGO calibration stream");
@@ -179,7 +341,7 @@ void populate_video_calibration(const std::shared_ptr<ob::Device>& device,
     calibration.video_streams.clear();
     for (const auto& [stream, profile] : profiles)
     {
-        auto entry = std::make_shared<core::EgoVideoCalibrationT>();
+        auto entry = std::make_shared<core::OrbbecEgoVideoCalibrationT>();
         entry->stream = stream;
         entry->reference_stream = reference;
         const auto read_intrinsics = [&entry](const std::shared_ptr<ob::VideoStreamProfile>& candidate)
@@ -191,7 +353,7 @@ void populate_video_calibration(const std::shared_ptr<ob::Device>& device,
                 !std::isfinite(source.fy) || source.fx <= 0 || source.fy <= 0 || !std::isfinite(source.cx) ||
                 !std::isfinite(source.cy))
                 throw std::runtime_error("SDK returned invalid camera intrinsics");
-            auto result = std::make_shared<core::EgoCameraIntrinsicsT>();
+            auto result = std::make_shared<core::OrbbecEgoCameraIntrinsicsT>();
             result->width = source.width;
             result->height = source.height;
             result->fx = source.fx;
@@ -232,9 +394,9 @@ void populate_video_calibration(const std::shared_ptr<ob::Device>& device,
         // The legacy stereo YAML has no verified four-camera identity mapping.
         if (!entry->intrinsics)
         {
-            const auto legacy = stream == core::EgoCameraStream_ColorLeft  ? calibration.color_left :
-                                stream == core::EgoCameraStream_ColorRight ? calibration.color_right :
-                                                                             nullptr;
+            const auto legacy = stream == core::OrbbecEgoCameraStream_ColorLeft  ? calibration.color_left :
+                                stream == core::OrbbecEgoCameraStream_ColorRight ? calibration.color_right :
+                                                                                   nullptr;
             if (legacy)
             {
                 entry->intrinsics = legacy;
@@ -248,9 +410,9 @@ void populate_video_calibration(const std::shared_ptr<ob::Device>& device,
     }
     for (auto& entry : calibration.video_streams)
     {
-        if (entry->stream == core::EgoCameraStream_ColorLeft && !calibration.color_left)
+        if (entry->stream == core::OrbbecEgoCameraStream_ColorLeft && !calibration.color_left)
             calibration.color_left = entry->intrinsics;
-        if (entry->stream == core::EgoCameraStream_ColorRight && !calibration.color_right)
+        if (entry->stream == core::OrbbecEgoCameraStream_ColorRight && !calibration.color_right)
             calibration.color_right = entry->intrinsics;
         if (entry->stream == reference)
         {
@@ -261,7 +423,7 @@ void populate_video_calibration(const std::shared_ptr<ob::Device>& device,
         {
             const auto source =
                 calibration_profiles.at(entry->stream)->getExtrinsicTo(calibration_profiles.at(reference));
-            auto result = std::make_shared<core::EgoExtrinsicsT>();
+            auto result = std::make_shared<core::OrbbecEgoExtrinsicsT>();
             result->rotation.assign(std::begin(source.rot), std::end(source.rot));
             result->translation_mm.assign(std::begin(source.trans), std::end(source.trans));
             for (size_t row = 0; row < 3; ++row)
@@ -299,25 +461,66 @@ void populate_video_calibration(const std::shared_ptr<ob::Device>& device,
     }
 }
 
+void detail::RawCalibrationTransfer::append(size_t total_size, size_t offset, const uint8_t* data, size_t size) noexcept
+{
+    if (failed_)
+        return;
+    // The SDK delivers contiguous chunks. Reject gaps and overlaps before copying.
+    if (completed_ || !data || !size || !total_size || offset > total_size || size > total_size - offset ||
+        offset != data_.size() || (total_size_ && total_size_ != total_size))
+    {
+        fail();
+        return;
+    }
+    total_size_ = total_size;
+    try
+    {
+        // Allocate only received bytes, not the device's untrusted total length.
+        data_.append(reinterpret_cast<const char*>(data), size);
+    }
+    catch (...)
+    {
+        exception_ = std::current_exception();
+        fail();
+    }
+}
+
+void detail::RawCalibrationTransfer::complete() noexcept
+{
+    if (completed_)
+        fail();
+    completed_ = true;
+}
+
+void detail::RawCalibrationTransfer::fail() noexcept
+{
+    failed_ = true;
+}
+
+std::string detail::RawCalibrationTransfer::finish() const
+{
+    if (exception_)
+        std::rethrow_exception(exception_);
+    if (failed_ || !completed_ || !total_size_ || data_.size() != total_size_)
+        throw std::runtime_error("Ego raw calibration transfer failed");
+    return data_;
+}
+
 std::string raw_data(const std::shared_ptr<ob::Device>& device, OBPropertyID id)
 {
-    std::vector<uint8_t> result;
-    bool failed = false;
+    detail::RawCalibrationTransfer transfer;
     device->getRawData(id,
-                       [&result, &failed](OBDataTranState state, OBDataChunk* chunk)
+                       [&transfer](OBDataTranState state, OBDataChunk* chunk) noexcept
                        {
-                           if (state == DATA_TRAN_STAT_TRANSFERRING && chunk && chunk->data && chunk->size)
-                           {
-                               if (result.size() < chunk->fullDataSize)
-                                   result.resize(chunk->fullDataSize);
-                               std::copy(chunk->data, chunk->data + chunk->size, result.begin() + chunk->offset);
-                           }
-                           else if (state < 0)
-                               failed = true;
+                           if (state == DATA_TRAN_STAT_TRANSFERRING && chunk)
+                               transfer.append(chunk->fullDataSize, chunk->offset, chunk->data, chunk->size);
+                           // DONE carries no payload, so handle it independently of chunk data.
+                           else if (state == DATA_TRAN_STAT_DONE)
+                               transfer.complete();
+                           else
+                               transfer.fail();
                        });
-    if (failed)
-        throw std::runtime_error("Ego raw calibration transfer failed");
-    return std::string(result.begin(), result.end());
+    return transfer.finish();
 }
 
 std::string json_escape(const std::string& input)

@@ -17,19 +17,29 @@ EGOPOST_SUBTREE = Path("src/python/isaaccapture_egopost")
 EGOPOST_LICENSE = "LicenseRef-OpenMDW-1.1"
 DEFAULT_LICENSE = "Apache-2.0"
 COPYRIGHT_HOLDER = "NVIDIA CORPORATION & AFFILIATES. All rights reserved."
+# Same rule as check-copyright-year's `files:`.
 SOURCE_FILES = re.compile(
-    r"\.(py|js|ts|cpp|c|h|hpp|cxx|hxx|cmake|md|yaml|yml|sh|fbs|toml|html)$"
+    r"\.(py|pyi|js|ts|cpp|cc|c|h|hpp|cxx|hxx|inc|cu|cuh|frag|vert|cmake|md|yaml|yml"
+    r"|sh|fbs|toml|html)$"
     r"|CMakeLists\.txt$|Dockerfile(\.[A-Za-z0-9_-]+)?$"
 )
+# Media files and .gitignore carry no header; like elsewhere in the repo they are not checked.
+EGOPOST_UNCHECKED_SUFFIXES = {".gif", ".jpeg", ".jpg", ".mp4", ".pdf", ".png", ".svg"}
+EGOPOST_UNCHECKED_NAMES = {".gitignore"}
 
 
 def covered_paths(project: Project) -> list[Path]:
-    # Check source files repository-wide; EgoPost additionally includes all assets.
+    # Check source files repository-wide; EgoPost additionally includes non-media files.
     paths = (path.relative_to(project.root) for path in project.all_files())
     return sorted(
         path
         for path in paths
-        if path.is_relative_to(EGOPOST_SUBTREE) or SOURCE_FILES.search(str(path))
+        if SOURCE_FILES.search(str(path))
+        or (
+            path.is_relative_to(EGOPOST_SUBTREE)
+            and path.suffix.lower() not in EGOPOST_UNCHECKED_SUFFIXES
+            and path.name not in EGOPOST_UNCHECKED_NAMES
+        )
     )
 
 
@@ -113,8 +123,10 @@ def fix_license(project: Project, path: Path) -> bool:
     if expected == EGOPOST_LICENSE and expressions == {"Apache-2.0"}:
         content = path.read_text()
         # Replace only the default header tag, retaining copyright and other notices.
+        # Split source literals so REUSE reads SPDX tags only from real headers.
         updated, count = re.subn(
-            r"(SPDX-License-Identifier:[ \t]*)Apache-2\.0(?=[ \t]*(?:\*/|-->)?[ \t]*$)",
+            r"(SPDX-License-"
+            r"Identifier:[ \t]*)Apache-2\.0(?=[ \t]*(?:\*/|-->)?[ \t]*$)",
             rf"\g<1>{EGOPOST_LICENSE}",
             content,
             count=1,

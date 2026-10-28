@@ -9,7 +9,6 @@ from pathlib import Path
 
 import isaaccapture.deviceio_trackers as deviceio_trackers
 from isaaccapture.deviceio_session import DeviceIOSession, McapRecordingConfig
-from isaaccapture.schema import EgoCameraStream
 import isaaccapture.oxr as oxr
 import isaaccapture.plugin_manager as plugin_manager
 
@@ -25,27 +24,35 @@ def main() -> int:
     )
     parser.add_argument("--format", choices=["mjpg", "h264", "h265"], default="h264")
     parser.add_argument("--preview", action="store_true")
+    parser.add_argument("--streams", choices=("stereo", "quad"), default="stereo")
     parser.add_argument("--mcap", type=Path, default=Path("ego.mcap"))
     args = parser.parse_args()
 
     prefix = "ego"
-    frame = deviceio_trackers.EgoFrameMetadataTracker(
-        prefix,
-        [
-            EgoCameraStream.ColorLeft,
-            EgoCameraStream.ColorRight,
-        ],
-    )
-    imu = deviceio_trackers.EgoImuTracker(prefix)
-    audio = deviceio_trackers.EgoAudioTracker(prefix + "/Audio")
-    calibration = deviceio_trackers.EgoCalibrationTracker(prefix + "/Calibration")
-    state = deviceio_trackers.EgoDeviceStateTracker(prefix + "/DeviceState")
-    trackers = [frame, imu, audio, calibration, state]
+    video_names = ("ColorLeft", "ColorRight")
+    if args.streams == "quad":
+        video_names += ("ColorSideLeft", "ColorSideRight")
+    height = 1200 if args.streams == "quad" else 1300
+    # The plugin publishes each stream as "{prefix}/{StreamName}"; one tracker per stream.
+    frames = {
+        name: deviceio_trackers.OrbbecEgoFrameMetadataTracker(f"{prefix}/{name}")
+        for name in video_names
+    }
+    imus = {
+        name: deviceio_trackers.OrbbecEgoImuTracker(f"{prefix}/{name}")
+        for name in ("Accel", "Gyro")
+    }
+    audio = deviceio_trackers.OrbbecEgoAudioTracker(prefix + "/Audio")
+    calibration = deviceio_trackers.OrbbecEgoCalibrationTracker(prefix + "/Calibration")
+    state = deviceio_trackers.OrbbecEgoDeviceStateTracker(prefix + "/DeviceState")
+    trackers = [*frames.values(), *imus.values(), audio, calibration, state]
 
     suffix = {"mjpg": "mjpg", "h264": "h264", "h265": "h265"}[args.format]
     plugin_args = [
-        f"--add-stream=camera=ColorLeft,output=recordings/left.{suffix},format={args.format},width=1600,height=1300,fps=30",
-        f"--add-stream=camera=ColorRight,output=recordings/right.{suffix},format={args.format},width=1600,height=1300,fps=30",
+        *(
+            f"--add-stream=camera={name},output=recordings/{name}.{suffix},format={args.format},width=1600,height={height},fps=30"
+            for name in video_names
+        ),
         "--enable-imu",
         "--imu-rate=1000",
         "--audio-output=recordings/audio.wav",
@@ -59,12 +66,10 @@ def main() -> int:
         plugin_args.append(f"--collection-prefix={prefix}")
 
     manager = plugin_manager.PluginManager([str(args.plugin_root)])
-    if "ego_camera" not in manager.get_plugin_names():
-        raise RuntimeError("ego_camera plugin was not discovered")
+    if "orbbec_ego_camera" not in manager.get_plugin_names():
+        raise RuntimeError("orbbec_ego_camera plugin was not discovered")
 
-    with manager.start(
-        "ego_camera", "ego_camera", plugin_args, shutdown_timeout_seconds=15.0
-    ) as plugin:
+    with manager.start("orbbec_ego_camera", "ego_camera", plugin_args) as plugin:
         if args.mode != "schema-pusher":
             deadline = time.monotonic() + args.duration
             while time.monotonic() < deadline:
@@ -76,11 +81,17 @@ def main() -> int:
         recording = McapRecordingConfig(
             str(args.mcap),
             [
-                (frame, "ego_metadata"),
-                (imu, "ego_imu"),
-                (audio, "ego_audio"),
-                (calibration, "ego_calibration"),
-                (state, "ego_device"),
+                *(
+                    (tracker, f"orbbec_ego_metadata_{name.lower()}")
+                    for name, tracker in frames.items()
+                ),
+                *(
+                    (tracker, f"orbbec_ego_imu_{name.lower()}")
+                    for name, tracker in imus.items()
+                ),
+                (audio, "orbbec_ego_audio"),
+                (calibration, "orbbec_ego_calibration"),
+                (state, "orbbec_ego_device"),
             ],
         )
         with oxr.OpenXRSession("EgoCameraTest", extensions) as oxr_session:
@@ -90,11 +101,9 @@ def main() -> int:
 
                 def all_data_received() -> bool:
                     return (
-                        not any(
-                            frame.get_stream_data(session, i) is None for i in range(2)
-                        )
-                        and not any(
-                            imu.get_stream_data(session, i) is None for i in range(2)
+                        all(
+                            tracker.get_data(session) is not None
+                            for tracker in (*frames.values(), *imus.values())
                         )
                         and audio.get_data(session) is not None
                         and calibration.get_data(session) is not None

@@ -7,7 +7,7 @@ import struct
 import sys
 
 from mcap.reader import make_reader
-from stream_inventory import STREAM_IDS, requested_streams
+from stream_inventory import STREAM_IDS, metadata_topic, requested_streams
 
 
 def unpack_from(fmt, data, offset, label):
@@ -65,6 +65,8 @@ def video_record(data, embedded_media):
 
 
 path, mode = sys.argv[1:3]
+if mode not in ("sidecar", "embedded"):
+    raise SystemExit(f"MCAP media mode must be sidecar or embedded: {mode!r}")
 if sys.argv[3].isdigit():
     expected_counts = {"ColorLeft": int(sys.argv[3]), "ColorRight": int(sys.argv[4])}
     manifest_path = Path(sys.argv[5])
@@ -103,11 +105,16 @@ if manifest_path.exists():
             f"Invalid requested profile manifest {manifest_path}: {error}"
         ) from error
 
-prefixes = ["ego_metadata"]
+
+def media_topic(stream):
+    return f"orbbec_ego_media/{stream}"
+
+
+topic_names = [metadata_topic]
 if mode == "embedded":
-    prefixes.append("ego_media")
+    topic_names.append(media_topic)
 topics = {
-    f"{prefix}/{stream}": {
+    topic_name(stream): {
         "stream": stream,
         "count": 0,
         "first": None,
@@ -118,7 +125,7 @@ topics = {
         "epochs": {},
         "timeline": [],
     }
-    for prefix in prefixes
+    for topic_name in topic_names
     for stream in expected_counts
 }
 with open(path, "rb") as stream:
@@ -129,7 +136,7 @@ with open(path, "rb") as stream:
         if state is None:
             continue
         stream_id, timestamp, sequence, profile, capture_epoch = video_record(
-            message.data, channel.topic.startswith("ego_media/")
+            message.data, channel.topic.startswith("orbbec_ego_media/")
         )
         if stream_id != STREAM_IDS[state["stream"]]:
             raise SystemExit(
@@ -210,8 +217,8 @@ for topic, state in topics.items():
         )
 if mode == "embedded":
     for stream in expected_counts:
-        metadata = topics[f"ego_metadata/{stream}"]
-        media = topics[f"ego_media/{stream}"]
+        metadata = topics[metadata_topic(stream)]
+        media = topics[media_topic(stream)]
         comparable = ("count", "profile", "timeline")
         if any(metadata[field] != media[field] for field in comparable):
             raise SystemExit(f"Embedded and metadata timelines differ for {stream}")

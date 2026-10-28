@@ -155,16 +155,16 @@ void print_capabilities(const std::shared_ptr<ob::Device>& device)
         switch (sensor_type)
         {
         case OB_SENSOR_COLOR_LEFT:
-            canonical_video_stream = camera_stream_descriptor(core::EgoCameraStream_ColorLeft).name;
+            canonical_video_stream = camera_stream_descriptor(core::OrbbecEgoCameraStream_ColorLeft).name;
             break;
         case OB_SENSOR_COLOR_RIGHT:
-            canonical_video_stream = camera_stream_descriptor(core::EgoCameraStream_ColorRight).name;
+            canonical_video_stream = camera_stream_descriptor(core::OrbbecEgoCameraStream_ColorRight).name;
             break;
         case OB_SENSOR_COLOR_SIDE_LEFT:
-            canonical_video_stream = camera_stream_descriptor(core::EgoCameraStream_ColorSideLeft).name;
+            canonical_video_stream = camera_stream_descriptor(core::OrbbecEgoCameraStream_ColorSideLeft).name;
             break;
         case OB_SENSOR_COLOR_SIDE_RIGHT:
-            canonical_video_stream = camera_stream_descriptor(core::EgoCameraStream_ColorSideRight).name;
+            canonical_video_stream = camera_stream_descriptor(core::OrbbecEgoCameraStream_ColorSideRight).name;
             break;
         default:
             break;

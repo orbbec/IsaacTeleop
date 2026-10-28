@@ -11,6 +11,14 @@ VIDEO_STREAMS = ("ColorLeft", "ColorRight", "ColorSideLeft", "ColorSideRight")
 STREAM_IDS = {name: index for index, name in enumerate(VIDEO_STREAMS)}
 
 
+def metadata_topic(stream):
+    return f"orbbec_ego_metadata_{stream.lower()}/FrameMetadata"
+
+
+# Follow the current upstream layout; legacy recording conversion is out of scope.
+VIDEO_METADATA_STREAMS = {metadata_topic(name): name for name in VIDEO_STREAMS}
+
+
 def requested_streams(path):
     path = Path(path)
     if not path.exists():
@@ -47,20 +55,21 @@ def recorded_streams(path):
                 for _, channel, _ in reader.iter_messages(log_time_order=False)
             }
         )
-    names = {
-        topic.removeprefix("ego_metadata/")
+    metadata_topics = {
+        topic
         for topic in topics
-        if topic.startswith("ego_metadata/")
+        if topic.startswith("orbbec_ego_metadata_") and topic.endswith("/FrameMetadata")
     }
-    unknown = names - STREAM_IDS.keys()
+    unknown = metadata_topics - VIDEO_METADATA_STREAMS.keys()
     if unknown:
         raise SystemExit(f"Unknown EGO video topics: {sorted(unknown)}")
+    names = {VIDEO_METADATA_STREAMS[topic] for topic in metadata_topics}
     if not names:
         raise SystemExit("MCAP contains no EGO video metadata channels")
     media = {
-        topic.removeprefix("ego_media/")
+        topic.removeprefix("orbbec_ego_media/")
         for topic in topics
-        if topic.startswith("ego_media/") and topic != "ego_media/Audio"
+        if topic.startswith("orbbec_ego_media/") and topic != "orbbec_ego_media/Audio"
     }
     if media and media != names:
         raise SystemExit(

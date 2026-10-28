@@ -3,10 +3,10 @@
 
 #include <log_bridge/logger.hpp>
 #include <mcap/tracker_channels.hpp>
-#include <schema/ego_audio_bfbs_generated.h>
-#include <schema/ego_audio_generated.h>
-#include <schema/ego_camera_bfbs_generated.h>
-#include <schema/ego_camera_generated.h>
+#include <schema/orbbec_ego_audio_bfbs_generated.h>
+#include <schema/orbbec_ego_audio_generated.h>
+#include <schema/orbbec_ego_camera_bfbs_generated.h>
+#include <schema/orbbec_ego_camera_generated.h>
 
 #include <cstdint>
 #include <filesystem>
@@ -22,15 +22,15 @@
 namespace
 {
 
-std::string extension(core::EgoPixelFormat format)
+std::string extension(core::OrbbecEgoPixelFormat format)
 {
     switch (format)
     {
-    case core::EgoPixelFormat_Mjpg:
+    case core::OrbbecEgoPixelFormat_Mjpg:
         return "mjpg";
-    case core::EgoPixelFormat_H264:
+    case core::OrbbecEgoPixelFormat_H264:
         return "h264";
-    case core::EgoPixelFormat_H265:
+    case core::OrbbecEgoPixelFormat_H265:
         return "h265";
     default:
         throw std::runtime_error("unsupported Ego video format in embedded MCAP");
@@ -83,18 +83,18 @@ void export_media(const std::filesystem::path& input_path, const std::filesystem
     if (!summary.ok() || !video_reader->footer())
         throw std::runtime_error("embedded MCAP has no valid completed summary/footer");
     const core::RecordedSchemas recorded(*video_reader);
-    std::map<core::EgoCameraStream, std::string> video_streams;
+    std::map<core::OrbbecEgoCameraStream, std::string> video_streams;
     bool has_audio = false;
     for (const auto& [_, channel] : video_reader->channels())
     {
-        if (channel->topic == "ego_media/Audio")
+        if (channel->topic == "orbbec_ego_media/Audio")
             has_audio = true;
-        else if (channel->topic.rfind("ego_media/", 0) == 0)
+        else if (channel->topic.rfind("orbbec_ego_media/", 0) == 0)
         {
-            const auto name = channel->topic.substr(std::string("ego_media/").size());
+            const auto name = channel->topic.substr(std::string("orbbec_ego_media/").size());
             bool known = false;
-            for (const auto stream : core::EnumValuesEgoCameraStream())
-                if (name == core::EnumNameEgoCameraStream(stream))
+            for (const auto stream : core::EnumValuesOrbbecEgoCameraStream())
+                if (name == core::EnumNameOrbbecEgoCameraStream(stream))
                 {
                     video_streams.emplace(stream, name);
                     known = true;
@@ -105,17 +105,17 @@ void export_media(const std::filesystem::path& input_path, const std::filesystem
         }
     }
     video_reader.reset();
-    using VideoViewer = core::McapTrackerViewers<core::EgoEncodedVideoFrameRecord>;
+    using VideoViewer = core::McapTrackerViewers<core::OrbbecEgoEncodedVideoFrameRecord>;
 
     std::filesystem::create_directories(output_dir);
     size_t video_count = 0;
     for (const auto& [stream, name] : video_streams)
     {
         // A reader per stream avoids buffering every other stream during this drain.
-        VideoViewer video(open_reader(input_path), "ego_media", { name }, recorded);
+        VideoViewer video(open_reader(input_path), "orbbec_ego_media", { name }, recorded);
         std::ofstream output;
         std::filesystem::path path;
-        core::EgoPixelFormat format{};
+        core::OrbbecEgoPixelFormat format{};
         while (const auto record = video.read(0))
         {
             const auto* data = record->data();
@@ -126,8 +126,8 @@ void export_media(const std::filesystem::path& input_path, const std::filesystem
             if (!output.is_open())
             {
                 format = data->pixel_format();
-                path =
-                    output_dir / (std::string(core::EnumNameEgoCameraStream(data->stream())) + "." + extension(format));
+                path = output_dir /
+                       (std::string(core::EnumNameOrbbecEgoCameraStream(data->stream())) + "." + extension(format));
                 output.open(path, std::ios::binary | std::ios::trunc);
                 if (!output)
                     throw std::runtime_error("unable to create video output: " + path.string());
@@ -155,10 +155,10 @@ void export_media(const std::filesystem::path& input_path, const std::filesystem
     uint32_t audio_rate = 0;
     uint16_t audio_channels = 0;
     uint16_t audio_bits = 0;
-    std::unique_ptr<core::McapTrackerViewers<core::EgoPcmAudioChunkRecord>> audio;
+    std::unique_ptr<core::McapTrackerViewers<core::OrbbecEgoPcmAudioChunkRecord>> audio;
     if (has_audio)
-        audio = std::make_unique<core::McapTrackerViewers<core::EgoPcmAudioChunkRecord>>(
-            open_reader(input_path), "ego_media", std::vector<std::string>{ "Audio" }, recorded);
+        audio = std::make_unique<core::McapTrackerViewers<core::OrbbecEgoPcmAudioChunkRecord>>(
+            open_reader(input_path), "orbbec_ego_media", std::vector<std::string>{ "Audio" }, recorded);
     while (audio)
     {
         const auto record = audio->read(0);
@@ -168,7 +168,7 @@ void export_media(const std::filesystem::path& input_path, const std::filesystem
         if (!data || !data->pcm_data())
             continue;
         if (data->sample_rate_hz() == 0 || data->channel_count() == 0 || data->bits_per_sample() != 16 ||
-            data->sample_format() != core::EgoAudioSampleFormat_S16LE ||
+            data->sample_format() != core::OrbbecEgoAudioSampleFormat_S16LE ||
             static_cast<uint64_t>(data->sample_count()) * data->channel_count() * 2 != data->pcm_data()->size())
             throw std::runtime_error("embedded PCM profile or sample count is invalid");
         if (!wav.is_open())
