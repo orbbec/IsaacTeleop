@@ -5,6 +5,7 @@ import importlib.util
 import json
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
 import sys
 from unittest.mock import patch
@@ -179,8 +180,8 @@ def test_helper_defaults_allow_auto_selection_and_sidecar_layout():
     assert result.returncode == 0, result.stderr
     assert "/raw/Color.h264" in result.stdout
     assert "/metadata.mcap" in result.stdout
-    assert "--media-mode=sidecar" in result.stdout
-    assert "--serial-number=" not in result.stdout
+    assert "--media-mode sidecar" in result.stdout
+    assert "--serial-number" not in result.stdout
     assert "--width" not in result.stdout
     assert "--height" not in result.stdout
 
@@ -192,9 +193,63 @@ def test_helper_embedded_mode_and_imu_override(tmp_path):
         "--imu-rate", "1000", "--config", str(config), "--media-mode", "embedded"
     )
     assert result.returncode == 0, result.stderr
-    assert "--imu-rate=1000" in result.stdout
-    assert "--video-output=" not in result.stdout
-    assert "--media-mode=embedded" in result.stdout
+    assert "--imu-rate 1000" in result.stdout
+    assert "--video-output" not in result.stdout
+    assert "--media-mode embedded" in result.stdout
+
+
+@pytest.mark.parametrize("equals", [False, True])
+@pytest.mark.parametrize("config_first", [False, True])
+def test_helper_value_syntax_preserves_values_and_cli_precedence(
+    tmp_path, equals, config_first
+):
+    config = tmp_path / "record = config.toml"
+    config.write_text('[record]\nserial_number = "old"\nduration = 1\n')
+    output = str(tmp_path / "run = 1")
+    pairs = [
+        ("--serial-number", "BM1V961000G = camera"),
+        ("--duration", "60"),
+        ("--output", output),
+    ]
+    cli = (
+        [f"{key}={value}" for key, value in pairs]
+        if equals
+        else [item for pair in pairs for item in pair]
+    )
+    config_args = [f"--config={config}"] if equals else ["--config", str(config)]
+    result = helper(*(config_args + cli if config_first else cli + config_args))
+    assert result.returncode == 0, result.stderr
+    arguments = shlex.split(result.stdout)
+    assert arguments[arguments.index("--serial-number") + 1] == pairs[0][1]
+    assert arguments[arguments.index("--duration") + 1] == "60"
+    assert (
+        arguments[arguments.index("--mcap-filename") + 1] == output + "/metadata.mcap"
+    )
+    assert not Path(output).exists()
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("--serial-number",),
+        ("--serial-number", ""),
+        ("--serial-number=",),
+        ("--config=",),
+        ("--serial-number", "--preview"),
+        ("--preview=true",),
+        ("--unknown=value",),
+    ],
+)
+def test_helper_rejects_missing_values_and_invalid_options(args):
+    assert helper(*args).returncode != 0
+
+
+def test_helper_rejects_duplicate_config_with_mixed_syntax(tmp_path):
+    config = tmp_path / "record.toml"
+    config.write_text("[record]\nduration = 1\n")
+    result = helper("--config", str(config), f"--config={config}")
+    assert result.returncode != 0
+    assert "Specify --config only once" in result.stderr
 
 
 @pytest.mark.parametrize(
@@ -258,8 +313,9 @@ def test_record_helper_runs_complete_verification_with_real_encoded_video(
         f"#!{sys.executable}\n"
         "import pathlib, shutil, sys\n"
         f"source = pathlib.Path({str(template)!r})\n"
-        "args = dict(arg[2:].split('=', 1) for arg in sys.argv[1:] if '=' in arg)\n"
-        "target = pathlib.Path(args['mcap-filename']).parent\n"
+        "argv = [arg for arg in sys.argv[1:] if arg != '--disable-imu']\n"
+        "args = dict(zip(argv[::2], argv[1::2]))\n"
+        "target = pathlib.Path(args['--mcap-filename']).parent\n"
         "for name in ('metadata.mcap', 'calibration.json', 'capabilities.txt'):\n"
         "    shutil.copyfile(source / name, target / name)\n"
         "shutil.copytree(source / 'raw', target / 'raw')\n"
@@ -303,9 +359,9 @@ def test_helper_passes_media_spool_from_cli_over_toml(tmp_path, relative):
     spool = "fragment.mcap" if relative else str(tmp_path / "fragment.mcap")
     result = helper("--config", str(config), "--mcap-media-spool", spool)
     assert result.returncode == 0, result.stderr
-    assert "--mcap-media-spool=" + spool in result.stdout
+    assert "--mcap-media-spool " + spool in result.stdout
     assert "old.mcap" not in result.stdout
-    assert "--mcap-filename=" in result.stdout
+    assert "--mcap-filename " in result.stdout
 
 
 @pytest.mark.parametrize(

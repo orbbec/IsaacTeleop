@@ -18,6 +18,12 @@ die() {
     exit 1
 }
 
+status() {
+    printf '\n============================================================\n'
+    printf '[%s] %s\n' "$1" "$2"
+    printf '============================================================\n'
+}
+
 usage() {
     cat <<'EOF'
 Usage: ./src/plugins/orbbec_wrist/install.sh [options]
@@ -28,6 +34,7 @@ user. Requires uv and CMake 3.24 or newer. Run from a source checkout, without
 sudo; only missing system packages and host udev setup request sudo.
 
 Options:
+  Value options accept both --option value and --option=value.
   --sdk-root PATH       Use an extracted SDK instead of downloading it.
                         ORBBEC_SDK_ROOT also selects a local SDK.
   --container           Skip host udev setup (also detected automatically).
@@ -55,6 +62,11 @@ skip_deps=0
 skip_udev=0
 preview=0
 while (( $# )); do
+    case "$1" in
+        --sdk-root=*|--preset=*|--jobs=*|--install-prefix=*)
+            set -- "${1%%=*}" "${1#*=}" "${@:2}"
+            ;;
+    esac
     case "$1" in
         --sdk-root|--preset|--jobs|--install-prefix)
             [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || die "$1 requires a value."
@@ -120,6 +132,9 @@ if (( !skip_deps )); then
     else
         echo "==> System dependencies are already installed."
     fi
+    status OK "Step 1/5: System dependencies are ready."
+else
+    status SKIP "Step 1/5: System dependency installation skipped (--skip-deps)."
 fi
 
 command -v uv >/dev/null 2>&1 || die "Install uv, a prerequisite for the Isaac Capture source build, then rerun this command."
@@ -127,6 +142,7 @@ command -v cmake >/dev/null 2>&1 || die "Install CMake 3.24 or newer."
 cmake_version="$(cmake --version | awk 'NR == 1 {print $3}')"
 [[ "$(printf '%s\n%s\n' 3.24 "$cmake_version" | sort -V | head -n 1)" == 3.24 ]] \
     || die "CMake $cmake_version is too old; install CMake 3.24 or newer."
+status OK "Step 2/5: Build prerequisites checked (uv found, CMake $cmake_version)."
 
 validate_sdk() {
     local root="$1" path
@@ -149,6 +165,8 @@ if [[ -n "$sdk_root" ]]; then
     validate_sdk "$sdk_root"
     sdk_root="$(cd "$sdk_root" && pwd -P)"
     echo "==> Using local SDK: $sdk_root"
+    status OK "Step 3/5: Local SDK validation succeeded (download skipped)."
+    printf 'SDK directory: %s\n' "$sdk_root"
 else
     command -v curl >/dev/null 2>&1 || die "curl is required to download the Orbbec SDK."
     command -v sha256sum >/dev/null 2>&1 || die "sha256sum is required to verify the Orbbec SDK."
@@ -170,21 +188,28 @@ else
         [[ "$actual_sha256" == "$SDK_SHA256" ]] \
             || die "SDK SHA-256 mismatch: expected $SDK_SHA256; got $actual_sha256."
         mv "$work/$SDK_ARCHIVE" "$archive"
+        status OK "SDK download and SHA-256 verification succeeded."
     else
         echo "==> Reusing SHA-256 verified SDK archive: $archive"
+        status OK "Cached SDK archive SHA-256 verification succeeded (download skipped)."
     fi
+    printf 'SDK archive: %s\n' "$archive"
     # Recreate the SDK from the verified archive; extracted files may have changed.
     tar -xzf "$archive" -C "$work"
     validate_sdk "$work/$SDK_NAME"
     sdk_root="$SDK_CACHE/$SDK_NAME"
     rm -rf "$sdk_root"
     mv "$work/$SDK_NAME" "$sdk_root"
+    status OK "Step 3/5: SDK extraction and validation succeeded; SDK setup complete."
+    printf 'SDK directory: %s\n' "$sdk_root"
 fi
 
 if (( container )); then
     echo "==> Container: skipping host udev setup."
+    status SKIP "Step 4/5: Host udev setup skipped (container)."
     echo "Install $sdk_root/shared/99-obsensor-libusb.rules on the host for Orbbec Wrist USB 2bc5:1203, then reconnect the camera."
 elif (( skip_udev )); then
+    status SKIP "Step 4/5: Host udev setup skipped (--skip-udev)."
     echo "Keeping existing udev rules; Orbbec Wrist USB 2bc5:1203 must already be accessible."
 else
     command -v udevadm >/dev/null 2>&1 || die "Install udev or use --skip-udev on a prepared host."
@@ -192,6 +217,8 @@ else
     run_as_root install -m 0644 "$sdk_root/shared/99-obsensor-libusb.rules" /etc/udev/rules.d/99-obsensor-libusb.rules
     run_as_root udevadm control --reload-rules
     run_as_root udevadm trigger --subsystem-match=usb --attr-match=idVendor=2bc5 --attr-match=idProduct=1203
+    status OK "Step 4/5: USB udev rules installed and reloaded."
+    printf 'udev rules: /etc/udev/rules.d/99-obsensor-libusb.rules\n'
     echo "Unplug and reconnect Orbbec Wrist to apply the permissions."
 fi
 
@@ -201,3 +228,10 @@ build_args=(build --sdk-root "$sdk_root" --preset "$preset")
 [[ -z "$install_prefix" ]] || build_args+=(--install-prefix "$install_prefix")
 echo "==> Building the Orbbec Wrist plugin."
 "$SCRIPT_DIR/orbbec_wrist.sh" "${build_args[@]}"
+status OK "Step 5/5: Orbbec Wrist plugin build succeeded."
+printf 'Plugin: %s/build-wrist-%s/src/plugins/orbbec_wrist/orbbec_wrist_camera_plugin\n' "$SOURCE_ROOT" "$preset"
+if [[ -n "$install_prefix" ]]; then
+    status OK "Plugin component installation succeeded."
+    printf 'Install prefix: %s\n' "$install_prefix"
+fi
+status OK "Orbbec Wrist setup completed successfully."

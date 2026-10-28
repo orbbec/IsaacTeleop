@@ -158,7 +158,7 @@ RUN="recordings/orbbec_wrist_$(date +%Y%m%d_%H%M%S)"
 `doctor` checks setup and loading; `list` reports compatible cameras.
 `--list-capabilities` opens the selected device and prints SDK/firmware and
 advertised profiles. One compatible camera is selected automatically; use helper
-`--serial-number SN` or native `--serial-number=SN` when several are connected.
+`--serial-number SN` when several are connected.
 Recovery stays pinned to the selected physical camera.
 
 The helper records Color, IMU, calibration, and diagnostics, then verifies them.
@@ -168,8 +168,8 @@ press it once and allow cleanup and verification to finish.
 For native video-only output:
 
 ```bash
-"$ORBBEC_WRIST_PLUGIN" --format=h264 --fps=30 --disable-imu --duration=10 \
-  --video-output="recordings/wrist_video_$(date +%Y%m%d_%H%M%S)/Color.h264"
+"$ORBBEC_WRIST_PLUGIN" --format h264 --fps 30 --disable-imu --duration 10 \
+  --video-output "recordings/wrist_video_$(date +%Y%m%d_%H%M%S)/Color.h264"
 ```
 
 Use `h265` with `.h265`, or `mjpg` with `.mjpg`. Resolution is fixed;
@@ -208,9 +208,9 @@ plugin one at a time; each opens the camera. Close the viewer or use Ctrl-C to e
 
 | Workflow | Native options | Result |
 |---|---|---|
-| Video sidecar only | `--video-output=PATH` | Accepted encoded Color bytes in a file. |
-| Local MCAP | `--mcap-filename=PATH` | Video metadata and enabled IMU; sidecar video by default. Add `--media-mode=embedded` to store media in MCAP. |
-| TeleopSession | `--collection-prefix=PREFIX` | Live metadata/IMU through OpenXR, available to generated trackers and session recording. |
+| Video sidecar only | `--video-output PATH` | Accepted encoded Color bytes in a file. |
+| Local MCAP | `--mcap-filename PATH` | Video metadata and enabled IMU; sidecar video by default. Add `--media-mode embedded` to store media in MCAP. |
+| TeleopSession | `--collection-prefix PREFIX` | Live metadata/IMU through OpenXR, available to generated trackers and session recording. |
 | Local MCAP and TeleopSession | Both destination options | Local encoded video plus metadata/IMU publication. |
 
 Local MCAP needs no OpenXR service unless publication or device status is requested.
@@ -223,9 +223,9 @@ Record Color video, enabled IMU, and calibration without an OpenXR service:
 
 ```bash
 RUN="recordings/orbbec_wrist_mcap_$(date +%Y%m%d_%H%M%S)"
-"$ORBBEC_WRIST_PLUGIN" --format=h264 --fps=30 --imu-rate=400 --duration=10 \
-  --mcap-filename="$RUN/metadata.mcap" \
-  --calibration-output="$RUN/calibration.json" --capabilities-output="$RUN/capabilities.txt"
+"$ORBBEC_WRIST_PLUGIN" --format h264 --fps 30 --imu-rate 400 --duration 10 \
+  --mcap-filename "$RUN/metadata.mcap" \
+  --calibration-output "$RUN/calibration.json" --capabilities-output "$RUN/capabilities.txt"
 ```
 
 Default sidecar mode creates `raw/Color.*` beside the MCAP. Use `--disable-imu`
@@ -263,8 +263,9 @@ config.plugins.append(PluginConfig(
     required=True,
     shutdown_timeout_seconds=5.0,
     plugin_args=[
-        "--serial-number=YOUR_WRIST_SERIAL", "--collection-prefix=orbbec_wrist/camera_1",
-        "--format=h264",
+        "--serial-number", "YOUR_WRIST_SERIAL",
+        "--collection-prefix", "orbbec_wrist/camera_1",
+        "--format", "h264",
     ],
 ))
 with embedded_recording(
@@ -320,8 +321,8 @@ available if device-status publication is unavailable. The status path is
 
 Sidecar mode is the default: encoded `raw/Color.*` sits beside the local MCAP.
 For embedded media, use helper `record --media-mode embedded` or native
-`--media-mode=embedded`. Add helper `--keep-media-sidecars` or native
-`--video-output=PATH` to retain a sidecar too. Verification compares both copies
+`--media-mode embedded`. Add helper `--keep-media-sidecars` or native
+`--video-output PATH` to retain a sidecar too. Verification compares both copies
 when present. `--keep-media-sidecars` is a helper option only.
 
 For one MCAP with video and other session devices, use the
@@ -333,33 +334,34 @@ writes/verifies its normal delivery; it does not start or merge a TeleopSession.
 
 ### Native CLI Options
 
-The native executable uses `--option=value`. Helper options use `--option value`;
+The native executable and shell scripts accept both `--option value` and
+`--option=value`. Examples use the space-separated form; flags take no value.
 TOML is accepted only by `orbbec_wrist.sh record`.
 
 | Option | Native default | Purpose |
 |---|---|---|
-| `--serial-number=SN` | Automatic with one compatible Orbbec Wrist | Required when several compatible devices are connected. |
+| `--serial-number SN` | Automatic with one compatible Orbbec Wrist | Required when several compatible devices are connected. |
 | `--list-devices` | Off | List compatible Orbbec Wrist identities and exit. |
 | `--list-capabilities` | Off | Open the selected Orbbec Wrist, print advertised profiles, then exit. |
-| `--format=h264\|h265\|mjpg` | `h264` | Request an encoded Color format; native `mjpeg` is also accepted. |
-| `--fps=N` | `30` | Video rate; resolution is fixed at 1600×1200. Zero selects an advertised rate. |
+| `--format h264\|h265\|mjpg` | `h264` | Request an encoded Color format; native `mjpeg` is also accepted. |
+| `--fps N` | `30` | Video rate; resolution is fixed at 1600×1200. Zero selects an advertised rate. |
 | `--disable-imu` | IMU enabled | Explicit video-only capture. |
-| `--imu-rate=400\|1000` | `400` Hz | Request the same rate for accelerometer and gyroscope. |
-| `--accel-full-scale=16\|24` | `24` g | Request the accelerometer range; gyro is fixed at 2000 dps. |
-| `--media-mode=sidecar\|embedded` | `sidecar` | Choose raw Color media or embedded MCAP media. |
-| `--calibration-output=PATH` | None | Save available structured intrinsics, raw YAML and availability errors. |
-| `--capabilities-output=PATH` | None | Save SDK/firmware identity and advertised profiles. |
-| `--mcap-media-spool=PATH` | None | Additional namespaced embedded MCAP fragment; requires `--media-mode=embedded` and `--collection-prefix`. The Python helper merges it after session shutdown. |
-| `--mcap-filename=PATH` | None | Record metadata and enabled IMU; encoded bytes are embedded only in embedded mode. |
+| `--imu-rate 400\|1000` | `400` Hz | Request the same rate for accelerometer and gyroscope. |
+| `--accel-full-scale 16\|24` | `24` g | Request the accelerometer range; gyro is fixed at 2000 dps. |
+| `--media-mode sidecar\|embedded` | `sidecar` | Choose raw Color media or embedded MCAP media. |
+| `--calibration-output PATH` | None | Save available structured intrinsics, raw YAML and availability errors. |
+| `--capabilities-output PATH` | None | Save SDK/firmware identity and advertised profiles. |
+| `--mcap-media-spool PATH` | None | Additional namespaced embedded MCAP fragment; requires `--media-mode embedded` and `--collection-prefix`. The Python helper merges it after session shutdown. |
+| `--mcap-filename PATH` | None | Record metadata and enabled IMU; encoded bytes are embedded only in embedded mode. |
 | `--preview` | Off | Show live Color in a preview-enabled build; Esc/Q or window close ends capture. |
-| `--video-output=PATH` | None | Also write accepted encoded Color bytes to a sidecar, or use it as the sole output. |
-| `--collection-prefix=PREFIX` | None | Publish Color metadata and enabled IMU through OpenXR. |
-| `--plugin-root-id=ID` | None | Enable best-effort device-status publication for `/camera/wrist`. |
-| `--duration=N` | `0` seconds | Stop after N seconds of the post-startup capture loop; zero waits for a signal. |
-| `--startup-timeout-ms=N` | `5000` | Readiness deadline for requested streams. |
-| `--stall-timeout-ms=N` | `3000` | Per-stream liveness deadline. |
-| `--reconnect-timeout-ms=N` | `30000` | Same-device recovery deadline; zero disables recovery. |
-| `--reconnect-interval-ms=N` | `1000` | Positive interval between recovery attempts. |
+| `--video-output PATH` | None | Also write accepted encoded Color bytes to a sidecar, or use it as the sole output. |
+| `--collection-prefix PREFIX` | None | Publish Color metadata and enabled IMU through OpenXR. |
+| `--plugin-root-id ID` | None | Enable best-effort device-status publication for `/camera/wrist`. |
+| `--duration N` | `0` seconds | Stop after N seconds of the post-startup capture loop; zero waits for a signal. |
+| `--startup-timeout-ms N` | `5000` | Readiness deadline for requested streams. |
+| `--stall-timeout-ms N` | `3000` | Per-stream liveness deadline. |
+| `--reconnect-timeout-ms N` | `30000` | Same-device recovery deadline; zero disables recovery. |
+| `--reconnect-interval-ms N` | `1000` | Positive interval between recovery attempts. |
 
 ### Helper Configuration
 

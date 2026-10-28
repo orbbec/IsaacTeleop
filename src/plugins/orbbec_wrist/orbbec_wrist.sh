@@ -25,6 +25,7 @@ Usage:
   orbbec_wrist.sh verify RUN_DIRECTORY [--require-calibration]
 
 Common options:
+  Value options accept both --option value and --option=value.
   --sdk-root PATH                  External SDK; defaults to ORBBEC_SDK_ROOT.
   --preset py3.11|py3.12|py3.13    Build Python version (default: py3.11).
   --plugin PATH                    Override the built/installed executable.
@@ -168,6 +169,11 @@ if [[ "$command" == record ]]; then
                 [[ -n "$config" && "$config" != --* ]] || die "--config requires a file."
                 (( ++index ))
                 ;;
+            --config=*)
+                [[ -z "$config" ]] || die "Specify --config only once."
+                config="${original_args[index]#*=}"
+                [[ -n "$config" && "$config" != --* ]] || die "--config requires a file."
+                ;;
         esac
     done
 fi
@@ -194,17 +200,26 @@ while (( $# )); do
         record:--require-calibration) require_calibration=1; shift; continue ;;
         record:--no-require-calibration) require_calibration=0; shift; continue ;;
         record:--dry-run) dry_run=1; shift; continue ;;
-        record:--config) shift 2; continue ;;
+    esac
+    option="${1%%=*}"
+    case "$command:$option" in
         *:--sdk-root|*:--preset|doctor:--plugin|list:--plugin|record:--plugin|\
         build:--jobs|build:--install-prefix|\
         record:--serial-number|record:--output|record:--duration|record:--format|\
         record:--fps|record:--media-mode|record:--imu-rate|\
         record:--accel-full-scale|record:--startup-timeout-ms|record:--stall-timeout-ms|\
         record:--reconnect-timeout-ms|record:--reconnect-interval-ms|\
-        record:--collection-prefix|record:--plugin-root-id|record:--mcap-media-spool)
-            [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || die "$1 requires a value."
-            settings["${1#--}"]="$2"
-            shift 2
+        record:--collection-prefix|record:--plugin-root-id|record:--mcap-media-spool|record:--config)
+            if [[ "$1" == *=* ]]; then
+                value="${1#*=}"
+                shift
+            else
+                [[ $# -ge 2 ]] || die "$option requires a value."
+                value="$2"
+                shift 2
+            fi
+            [[ -n "$value" && "$value" != --* ]] || die "$option requires a value."
+            [[ "$option" == --config ]] || settings["${option#--}"]="$value"
             ;;
         *) die "Unknown $command option '$1'; run with --help." ;;
     esac
@@ -327,17 +342,17 @@ case "$command" in
         run_dir="${settings[output]:-$output_base/recordings/wrist_$(date +%Y%m%d_%H%M%S)}"
         [[ "$run_dir" == /* ]] || run_dir="$PWD/$run_dir"
         [[ ! -e "$run_dir" && ! -L "$run_dir" ]] || die "Output path already exists: $run_dir"
-        plugin_args=("--mcap-filename=$run_dir/metadata.mcap" "--media-mode=${settings[media-mode]}"
-                     "--calibration-output=$run_dir/calibration.json" "--capabilities-output=$run_dir/capabilities.txt")
-        [[ -z "${settings[serial-number]}" ]] || plugin_args+=("--serial-number=${settings[serial-number]}")
+        plugin_args=(--mcap-filename "$run_dir/metadata.mcap" --media-mode "${settings[media-mode]}"
+                     --calibration-output "$run_dir/calibration.json" --capabilities-output "$run_dir/capabilities.txt")
+        [[ -z "${settings[serial-number]}" ]] || plugin_args+=(--serial-number "${settings[serial-number]}")
         for key in duration format fps imu-rate accel-full-scale startup-timeout-ms \
                 stall-timeout-ms reconnect-timeout-ms reconnect-interval-ms collection-prefix plugin-root-id mcap-media-spool; do
-            [[ -z "${settings[$key]}" ]] || plugin_args+=("--$key=${settings[$key]}")
+            [[ -z "${settings[$key]}" ]] || plugin_args+=("--$key" "${settings[$key]}")
         done
         (( imu )) || plugin_args+=(--disable-imu)
         (( !preview )) || plugin_args+=(--preview)
         if [[ "${settings[media-mode]}" == sidecar ]] || (( sidecars )); then
-            plugin_args+=("--video-output=$run_dir/raw/Color.${settings[format]}")
+            plugin_args+=(--video-output "$run_dir/raw/Color.${settings[format]}")
         fi
         if (( dry_run )); then
             if [[ -n "$sdk_root" ]]; then

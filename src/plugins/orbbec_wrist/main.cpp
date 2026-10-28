@@ -38,19 +38,20 @@ uint32_t number(const std::string& value)
 void usage()
 {
     std::cout << "Orbbec Wrist camera plugin\n"
+                 "Value options accept both --option value and --option=value.\n"
                  "  --list-devices\n"
-                 "  [--serial-number=SN] [--collection-prefix=PREFIX] [--mcap-filename=PATH] [--video-output=PATH]\n"
-                 "  --format=h264|h265|mjpg --fps=N (default: 30; fixed 1600x1200)\n"
-                 "  --media-mode=sidecar|embedded (default: sidecar)\n"
-                 "  --mcap-media-spool=PATH (embedded fragment for TeleopSession merger)\n"
-                 "  --calibration-output=PATH.json --capabilities-output=PATH.txt --list-capabilities\n"
+                 "  [--serial-number SN] [--collection-prefix PREFIX] [--mcap-filename PATH] [--video-output PATH]\n"
+                 "  --format h264|h265|mjpg --fps N (default: 30; fixed 1600x1200)\n"
+                 "  --media-mode sidecar|embedded (default: sidecar)\n"
+                 "  --mcap-media-spool PATH (embedded fragment for TeleopSession merger)\n"
+                 "  --calibration-output PATH.json --capabilities-output PATH.txt --list-capabilities\n"
                  "  One compatible Orbbec Wrist is selected automatically; multiple devices require --serial-number.\n"
-                 "  --imu-rate=400|1000 --accel-full-scale=16|24 --disable-imu\n"
-                 "  --video-output=PATH (optional encoded Color sidecar)\n"
+                 "  --imu-rate 400|1000 --accel-full-scale 16|24 --disable-imu\n"
+                 "  --video-output PATH (optional encoded Color sidecar)\n"
                  "  --preview (live Color window; Esc/Q or window close stops recording)\n"
-                 "  --startup-timeout-ms=N --stall-timeout-ms=N\n"
-                 "  --reconnect-timeout-ms=N (0: disabled) --reconnect-interval-ms=N\n"
-                 "  --duration=N (seconds; 0: until signal) --plugin-root-id=ID\n"
+                 "  --startup-timeout-ms N --stall-timeout-ms N\n"
+                 "  --reconnect-timeout-ms N (0: disabled) --reconnect-interval-ms N\n"
+                 "  --duration N (seconds; 0: until signal) --plugin-root-id ID\n"
                  "Profiles are validated against the selected device. No clock synchronization is enabled.\n";
 }
 } // namespace
@@ -94,9 +95,14 @@ try
             continue;
         }
         const auto split = argument.find('=');
-        if (split == std::string::npos)
-            throw std::invalid_argument("Expected --option=value: " + argument);
-        const auto key = argument.substr(0, split), value = argument.substr(split + 1);
+        const auto key = argument.substr(0, split);
+        std::string value;
+        if (split != std::string::npos)
+            value = argument.substr(split + 1);
+        else if (i + 1 < argc && std::string(argv[i + 1]).rfind("--", 0) != 0 && std::string(argv[i + 1]) != "-h")
+            value = argv[++i];
+        if (value.empty() || value.rfind("--", 0) == 0)
+            throw std::invalid_argument(key + " requires a value; use " + key + " VALUE");
         if (key == "--serial-number")
             capture.serial_number = value;
         else if (key == "--collection-prefix")

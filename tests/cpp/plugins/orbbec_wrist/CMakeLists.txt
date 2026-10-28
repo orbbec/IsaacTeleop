@@ -48,4 +48,16 @@ if(TARGET orbbec_wrist_camera_plugin)
     add_test(NAME wrist_plugin_help COMMAND orbbec_wrist_camera_plugin --help)
     add_test(NAME wrist_plugin_invalid_args COMMAND orbbec_wrist_camera_plugin --serial-number= --duration=-1)
     set_tests_properties(wrist_plugin_invalid_args PROPERTIES WILL_FAIL TRUE)
+    add_test(NAME wrist_plugin_space_args COMMAND orbbec_wrist_camera_plugin
+        --serial-number "SN = 123" --video-output "a path/video=1.h264"
+        --format h264 --duration 60 --imu-rate 400 --help)
+    add_test(NAME wrist_plugin_equals_args COMMAND orbbec_wrist_camera_plugin
+        "--serial-number=SN = 123" "--video-output=a path/video=1.h264"
+        --format=h264 --duration=60 --imu-rate=400 --help)
+    add_test(NAME wrist_plugin_missing_value COMMAND orbbec_wrist_camera_plugin --serial-number)
+    add_test(NAME wrist_plugin_empty_value COMMAND orbbec_wrist_camera_plugin --serial-number= --help)
+    add_test(NAME wrist_plugin_option_as_value COMMAND orbbec_wrist_camera_plugin --serial-number --help)
+    add_test(NAME wrist_plugin_flag_with_value COMMAND orbbec_wrist_camera_plugin --preview=true --help)
+    set_tests_properties(wrist_plugin_missing_value wrist_plugin_empty_value
+        wrist_plugin_option_as_value wrist_plugin_flag_with_value PROPERTIES WILL_FAIL TRUE)
 endif()
