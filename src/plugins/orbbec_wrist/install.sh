@@ -36,7 +36,7 @@ sudo; only missing system packages and host udev setup request sudo.
 Options:
   Value options accept both --option value and --option=value.
   --sdk-root PATH       Use an extracted SDK instead of downloading it.
-                        ORBBEC_SDK_ROOT also selects a local SDK.
+                        Inherited ORBBEC_SDK_ROOT is ignored.
   --container           Skip host udev setup (also detected automatically).
   --skip-deps           Use existing system dependencies (uv/CMake still required).
   --skip-udev           Keep existing host udev configuration.
@@ -53,7 +53,8 @@ The vendor udev file covers multiple devices, including Orbbec Wrist USB 2bc5:12
 EOF
 }
 
-sdk_root="${ORBBEC_SDK_ROOT:-}"
+# Only an explicit --sdk-root may bypass managed SDK verification and recovery.
+sdk_root=""
 preset=py3.11
 jobs=""
 install_prefix=""
